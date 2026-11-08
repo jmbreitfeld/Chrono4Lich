@@ -1,0 +1,5 @@
+# keep Windows batch files with Windows line endings, everything else as-is
+*.bat text eol=crlf
+*.sh  text eol=lf
+*.ico binary
+*.png binary

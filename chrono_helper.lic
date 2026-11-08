@@ -1,0 +1,115 @@
+=begin
+  chrono_helper.lic
+
+  Started automatically by Chrono when it logs a character in.
+  Reports this session's status to Chrono and handles logout requests.
+
+  You normally never run this by hand. If Chrono says the helper isn't
+  responding (for example after a ;kill), restart it with ;chrono_helper
+
+      game: Gemstone
+      tags: login, logout, scheduler
+   version: 0.1.0
+=end
+
+require 'json'
+require 'fileutils'
+
+no_kill_all
+no_pause_all
+
+state_dir = File.join(DATA_DIR, 'chrono')
+FileUtils.mkdir_p(state_dir)
+
+wait_until { XMLData.name.to_s != '' }
+char_name   = XMLData.name
+status_file = File.join(state_dir, "#{char_name}.status.json")
+cmd_file    = File.join(state_dir, "#{char_name}.cmd")
+
+current = {
+  'name'      => char_name,
+  'game'      => XMLData.game.to_s,
+  'pid'       => Process.pid,
+  'state'     => 'online',
+  'since'     => Time.now.to_i,
+  'heartbeat' => Time.now.to_i,
+  'detail'    => nil
+}
+
+# Write to a temp file, then rename, so Chrono never reads a half-written file.
+# Windows can briefly lock the file while Chrono reads it, so retry a few times,
+# then fail loudly.
+write_status = proc do |changes|
+  current.merge!(changes)
+  current['heartbeat'] = Time.now.to_i
+  tmp = status_file + '.tmp'
+  attempts = 0
+  begin
+    File.write(tmp, JSON.pretty_generate(current))
+    File.rename(tmp, status_file)
+  rescue Errno::EACCES, Errno::EBUSY
+    attempts += 1
+    raise if attempts >= 5
+    sleep 0.2
+    retry
+  end
+end
+
+do_logout = proc do
+  write_status.call('state' => 'logging_out', 'detail' => nil)
+  echo 'Chrono: logout requested.'
+  3.times do |attempt|
+    waitrt?
+    waitcastrt?
+    clear
+    put 'quit'
+    responses = []
+    deadline = Time.now + 15
+    while Time.now < deadline
+      line = get?
+      if line
+        responses << line.strip unless line.strip.empty?
+      else
+        sleep 0.2
+      end
+    end
+    # If the quit had worked, the game would have closed the connection and Lich
+    # would have ended this script before we got here.
+    write_status.call('detail' => "Attempt #{attempt + 1}: still connected. Last game lines: #{responses.last(5).join(' | ')}")
+  end
+  write_status.call('state' => 'logout_failed')
+  echo "Chrono: LOGOUT FAILED after 3 attempts. #{current['detail']}"
+end
+
+before_dying do
+  begin
+    write_status.call('state' => 'offline')
+  rescue => e
+    echo "Chrono: could not write offline status: #{e.class}: #{e.message}"
+  end
+end
+
+# A command left over from an earlier session must never fire on this one.
+File.delete(cmd_file) if File.exist?(cmd_file)
+
+write_status.call('state' => 'online')
+echo "Chrono helper active for #{char_name} (Lich PID #{Process.pid})."
+
+last_beat = Time.now
+loop do
+  if File.exist?(cmd_file)
+    cmd = File.read(cmd_file).strip.downcase
+    File.delete(cmd_file)
+    if cmd == 'logout'
+      do_logout.call
+    else
+      echo "Chrono: unknown command '#{cmd}' ignored."
+      write_status.call('detail' => "Unknown command '#{cmd}' ignored.")
+    end
+  end
+  if Time.now - last_beat >= 10
+    write_status.call({})
+    last_beat = Time.now
+  end
+  sleep 1
+end
