@@ -226,6 +226,7 @@ module Rewards
     end
     # What Lich itself printed (its own messages; never the passwords, which only appear
     # between the markers on standard output). Used to explain failures.
+    out = out.b.force_encoding(Encoding::UTF_8)
     said = (err + out.sub(/CHRONO-PASSWORDS-BEGIN.*CHRONO-PASSWORDS-END/m, ''))
            .force_encoding(Encoding::UTF_8).scrub
            .lines.map(&:strip).reject(&:empty?).reject { |l| l.start_with?('from ') }
@@ -235,9 +236,14 @@ module Rewards
       log "Lich's saved-password check failed. Lich said: #{said.first(5).join(' | ')[0, 600]}", $stderr
       fail! "Couldn't open Lich's encrypted saved passwords#{reason.empty? ? '' : ": #{reason}"}"
     end
-    json = out[/CHRONO-PASSWORDS-BEGIN\n(.*)\nCHRONO-PASSWORDS-END/m, 1]
+    # (Windows line endings tolerated: older Chrono versions wrote "\r\n" there.)
+    json = out[/CHRONO-PASSWORDS-BEGIN\r?\n(.*?)\r?\nCHRONO-PASSWORDS-END/m, 1]
     unless json
-      log "Lich's saved-password check gave no result. Lich said: #{said.first(5).join(' | ')[0, 600]}", $stderr
+      # never log the output itself: it may hold passwords
+      log "Lich's saved-password check gave no result (exit #{status.exitstatus}, #{out.bytesize} bytes, " \
+          "begin marker #{out.include?('CHRONO-PASSWORDS-BEGIN') ? 'found' : 'missing'}, " \
+          "end marker #{out.include?('CHRONO-PASSWORDS-END') ? 'found' : 'missing'}). " \
+          "Lich said: #{said.first(5).join(' | ')[0, 600]}", $stderr
       fail! "Lich didn't return its saved passwords#{reason.empty? ? '.' : ". Lich said: #{reason}"}"
     end
     result = JSON.parse(json)

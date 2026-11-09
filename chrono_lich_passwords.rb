@@ -10,6 +10,7 @@
 # result (between the BEGIN/END markers) appears on standard output.
 
 result_out = $stdout.dup
+result_out.binmode # Windows would otherwise turn "\n" into "\r\n"
 $stdout.reopen($stderr)
 
 lich_dir = ARGV.fetch(0)
