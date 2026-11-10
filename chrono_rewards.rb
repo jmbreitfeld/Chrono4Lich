@@ -87,8 +87,11 @@ module Rewards
   end
 
   # What GitHub was last set up with, to tell when it needs updating.
+  # (Exact timing changes the workflow too: GitHub's schedule becomes the backup.)
   def github_signature(data = load)
-    JSON.generate([github_accounts(data).map { |a| [a[:name], a[:daily]] }, data['time']])
+    sig = [github_accounts(data).map { |a| [a[:name], a[:daily]] }, data['time']]
+    sig << 'exact' if exact_state(data)
+    JSON.generate(sig)
   end
 
   # nil when not set up; otherwise {'repo', 'login', 'accounts', 'time', 'at', 'stale', 'signature'}
@@ -100,16 +103,88 @@ module Rewards
     wanted = github_accounts(data)
     return wanted.empty? ? nil : 'not set up yet' unless gh && !gh['stopped']
     return 'a saved password changed since it was set up' if gh['stale']
-    return 'accounts or the time changed since it was set up' if gh['signature'] != github_signature(data)
+    return 'accounts, the time or exact timing changed since it was set up' if gh['signature'] != github_signature(data)
     nil
   end
 
   def github_synced(result)
     data = load
     data['github'] = { 'repo' => result[:repo], 'login' => result[:login], 'accounts' => result[:accounts],
-                       'time' => result[:time], 'cron' => result[:cron], 'at' => Time.now.to_i,
+                       'time' => result[:time], 'cron' => result[:cron], 'branch' => result[:branch], 'at' => Time.now.to_i,
                        'signature' => github_signature(data), 'stale' => false }
     save(data)
+  end
+
+  # ---------- exact timing (cron-job.org starts the GitHub run) ----------
+
+  # nil when off; otherwise {'job_id', 'time', 'tz', 'repo', 'at'}
+  def exact_state(data = load) = data['exact']
+
+  # Why the cron-job.org job needs updating (only its time can drift), or nil.
+  def exact_needs_update(data = load)
+    ex = exact_state(data)
+    return nil unless ex
+    return 'the claim time changed' if ex['time'] != data['time']
+    nil
+  end
+
+  # Time zone name for cron-job.org, and the time to give it. Without a known zone name, UTC
+  # (the time then shifts by an hour with daylight saving time, like GitHub's own schedule).
+  def exact_zone(local_time)
+    tz = ChronoCronJob.local_timezone
+    return [tz, local_time] if tz
+
+    h, m = local_time.split(':').map(&:to_i)
+    now = Time.now
+    t = Time.local(now.year, now.month, now.day, h, m).utc
+    ['UTC', format('%02d:%02d', t.hour, t.min)]
+  end
+
+  # token: the fine-grained GitHub token the user made; key: their cron-job.org API key.
+  # Neither is saved. Afterwards GitHub needs updating (its schedule becomes the backup).
+  def exact_setup!(key, token, progress: ->(_) {})
+    data = load
+    gh = github_state(data)
+    fail! 'Set up GitHub first (Claim on GitHub, then "Set up GitHub...").' unless gh && gh['repo'] && !gh['stopped']
+    progress.call('Checking the GitHub token...')
+    ChronoGitHub.check_run_token(token, gh['repo'])
+    progress.call("The token can start runs in #{gh['repo']} (no run was started).")
+    tz, at = exact_zone(data['time'])
+    progress.call('Setting up the daily job on cron-job.org...')
+    id = ChronoCronJob.setup!(key, gh['repo'], gh['branch'] || 'main', token, at, tz)
+    progress.call("cron-job.org will start the run every day at #{at} (#{tz}).")
+    data = load
+    data['exact'] = { 'job_id' => id, 'time' => data['time'], 'tz' => tz, 'repo' => gh['repo'], 'at' => Time.now.to_i }
+    save(data)
+    log "EXACT set up cron-job.org job #{id} for #{gh['repo']} at #{at} #{tz}"
+    id
+  rescue ChronoGitHub::Error, ChronoCronJob::Error => e
+    fail! e.message
+  end
+
+  # After the claim time changed: moves the cron-job.org job to the new time.
+  def exact_update_time!(key)
+    data = load
+    ex = exact_state(data) or fail!('Exact timing isn\'t set up.')
+    tz, at = exact_zone(data['time'])
+    ChronoCronJob.set_time!(key, ex['job_id'], at, tz)
+    data['exact'] = ex.merge('time' => data['time'], 'tz' => tz, 'at' => Time.now.to_i)
+    save(data)
+    log "EXACT moved cron-job.org job #{ex['job_id']} to #{at} #{tz}"
+  rescue ChronoCronJob::Error => e
+    fail! e.message
+  end
+
+  # Removes the cron-job.org job (key nil: just forget it, the user deletes it on cron-job.org).
+  def exact_stop!(key)
+    data = load
+    ex = exact_state(data)
+    ChronoCronJob.delete!(key, ex['job_id']) if ex && key
+    data.delete('exact')
+    save(data)
+    log "EXACT turned off#{key ? ' (cron-job.org job deleted)' : ' (job left on cron-job.org)'}"
+  rescue ChronoCronJob::Error => e
+    fail! e.message
   end
 
   def github_stopped
@@ -136,7 +211,8 @@ module Rewards
     missing = wanted.reject { |a| pw[a[:name]].to_s != '' }
     fail! "No saved password for: #{missing.map { |a| a[:name] }.join(', ')}." unless missing.empty?
     result = ChronoGitHub.sync!(token, wanted.map { |a| { name: a[:name], password: pw[a[:name]], daily: a[:daily] } },
-                                data['time'], progress: progress)
+                                data['time'], exact: !exact_state(data).nil?,
+                                first_run: !(github_state(data) && !github_state(data)['stopped']), progress: progress)
     github_synced(result)
     result
   end
@@ -208,7 +284,22 @@ module Rewards
   end
 
   # Encrypted entry.yaml: let Lich's own code decrypt (see chrono_lich_passwords.rb).
-  def lich_passwords
+  # Tries up to 3 times: when Lich is open it can be rewriting entry.yaml at that moment, and
+  # then Lich's code reads nothing.
+  def lich_passwords(tries: 3)
+    attempt = 0
+    begin
+      attempt += 1
+      lich_passwords_once
+    rescue Fail => e
+      raise if attempt >= tries || e.message.start_with?('Lich took too long')
+      log "Asking Lich for its saved passwords didn't work (try #{attempt} of #{tries}): #{e.message}"
+      sleep 5
+      retry
+    end
+  end
+
+  def lich_passwords_once
     script = File.join(__dir__, 'chrono_lich_passwords.rb')
     out = +''
     err = +''
@@ -231,7 +322,11 @@ module Rewards
            .force_encoding(Encoding::UTF_8).scrub
            .lines.map(&:strip).reject(&:empty?).reject { |l| l.start_with?('from ') }
            .map { |l| l =~ /\A\S+:\d+:in [^:]*:\s*(.+?)(?: \(([\w:]+)\))?\z/ ? "#{Regexp.last_match(1)}#{Regexp.last_match(2) ? " (#{Regexp.last_match(2)})" : ''}" : l }
-    reason = said.first.to_s[0, 200]
+    # Lich's own log lines (passed through by the helper): its errors and warnings explain best
+    lich_said = said.select { |l| l.start_with?('LICH-LOG ') }.map { |l| l.delete_prefix('LICH-LOG ') }
+    said = said.reject { |l| l.start_with?('LICH-LOG ') }
+    lich_said.each { |l| log "  Lich: #{l[0, 300]}" }
+    reason = (lich_said.find { |l| l.match?(/\A(error|warn)/i) } || said.first || lich_said.last).to_s[0, 200]
     unless status.success?
       log "Lich's saved-password check failed. Lich said: #{said.first(5).join(' | ')[0, 600]}", $stderr
       fail! "Couldn't open Lich's encrypted saved passwords#{reason.empty? ? '' : ": #{reason}"}"
@@ -247,7 +342,9 @@ module Rewards
       fail! "Lich didn't return its saved passwords#{reason.empty? ? '.' : ". Lich said: #{reason}"}"
     end
     result = JSON.parse(json)
-    fail! 'Lich returned no saved passwords. Open Lich once to check that your saved logins load.' if result.empty?
+    if result.empty?
+      fail! "Lich returned no saved passwords#{reason.empty? ? '. Open Lich once to check that your saved logins load.' : ". Lich said: #{reason}"}"
+    end
     result
   rescue JSON::ParserError
     fail! 'Lich returned something unexpected when asked for its saved passwords.'

@@ -114,10 +114,36 @@ CLAIMING ON GITHUB (works while the computer is off)
     The Rewards tab says "NEEDS UPDATING" when that's needed: after changing which
     accounts claim on GitHub, the daily-login setting or time, or a saved password.
   - GitHub runs on UTC time, so the run time shifts by an hour when daylight saving time
-    starts or ends, and runs can start a few minutes late.
+    starts or ends. GitHub's own timer also often starts runs late, sometimes by hours,
+    and busiest at the top of the hour: pick an odd time like 3:23, or use exact timing.
+  - A claim that fails (for example Simutronics' servers answering "internal server
+    error") is tried again 5 minutes later, then 15 minutes later. Claiming twice is
+    harmless. Only one run happens at a time.
+  - After the first setup, updating GitHub doesn't start a run; the next one is at the
+    scheduled time.
   - GitHub can't tell whether you're playing, so daily login rewards on GitHub always
     run (simu-rewards logs each Prime character in briefly). Leave daily logins off for
     an account you might be playing at that time.
+
+EXACT TIMING FOR GITHUB (optional, free)
+  - "Exact timing..." on the Rewards tab makes a free cron-job.org account start the GitHub
+    run at your chosen time each day (GitHub starts those within a minute). GitHub's own
+    schedule stays on as a backup about 3 hours later, and only claims if that day's run
+    didn't succeed.
+  - You need: a free cron-job.org account and a GitHub token. Chrono opens GitHub's token
+    page with everything filled in except one setting GitHub can't fill in: under
+    "Repository access" choose "Only select repositories" and pick only
+    chrono4lich-rewards, then "Generate token". That token can only start runs in that one
+    repository; it can't read your logins. Then on cron-job.org: Settings, create an API key.
+  - Chrono uses the API key to create the job, then forgets it, and never keeps the token
+    (it lives in the cron-job.org job). After changing the claim time, the Rewards tab says
+    exact timing NEEDS UPDATING: click "Exact timing..." and paste the API key again.
+  - cron-job.org emails you if GitHub refuses to start a run (for example, the token was
+    deleted).
+  - To turn it off: "Exact timing..." again. Then delete the token on GitHub (your picture >
+    Settings > Developer settings > Personal access tokens > Fine-grained tokens).
+  - Command line: chrono exact-setup / chrono exact-stop
+
   - "Stop using GitHub..." turns the daily run off and deletes the stored logins; those
     accounts go back to claiming on this computer. The repository itself stays on GitHub
     (delete it there from the repository's Settings if you like). Uninstalling Chrono
@@ -139,6 +165,8 @@ COMMAND LINE (optional)
     chrono rewards-set ACCOUNT where github|pc
     chrono github-setup             (sign in and set up / update GitHub)
     chrono github-stop
+    chrono exact-setup              (cron-job.org starts the GitHub run on time)
+    chrono exact-stop
   A name can include its realm, e.g. Name:shattered.
 
 UPDATING, MOVING OR A NEW RUBY
@@ -179,6 +207,9 @@ PRIVACY AND PASSWORDS
   - Claiming on GitHub (only if you set it up): the logins for the accounts you chose are
     encrypted on this computer with your repository's public key and stored as GitHub
     secrets in your private repository. Chrono never keeps your GitHub sign-in.
+  - Exact timing (only if you set it up): your cron-job.org job holds a GitHub token that
+    can only start runs in chrono4lich-rewards. Chrono keeps neither that token nor your
+    cron-job.org API key.
   - Chrono never shows passwords, never writes them to its log, and never sends them
     anywhere except Simutronics.
   - Before changing your saved logins, Chrono backs them up to

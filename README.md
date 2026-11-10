@@ -21,6 +21,7 @@ You need Lich5 already installed and working, with its own Ruby. Full instructio
 Chrono runs on your computer and has no server of its own. It collects nothing, and it never sends information anywhere except as described below, each time because you asked it to:
 
 - **Simutronics** (`eaccess.play.net`, `store.play.net`): your account name and password go here, encrypted, when you add a login, change a password, or claim rewards. This is the same login service Lich and the game use.
+- **cron-job.org:** only if you turn on "Exact timing". Chrono creates a daily job on **your own** cron-job.org account that asks GitHub to start your rewards run. The job holds a GitHub token that can only start runs in your private rewards repository. Chrono keeps neither that token nor your cron-job.org API key.
 - **GitHub:** only if you choose "Claim on GitHub" on the Rewards tab. The logins for the accounts you pick are encrypted on your computer and stored as secrets in a **private** repository on **your own** GitHub account. Chrono never keeps your GitHub sign-in.
 
 Passwords are never shown, logged, or written anywhere other than Lich's own saved-login file. Before changing that file, Chrono keeps a backup in `Lich5/data/chrono/backups`.

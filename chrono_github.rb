@@ -10,6 +10,10 @@
 #   - .github/workflows/rewards.yml runs simu-rewards' action daily, plus a step that stops
 #     GitHub from pausing the schedule after 60 days without activity,
 #   - a first run is started so the user can see it work.
+#
+# Exact timing (optional, see chrono_cronjob.rb): GitHub's own timer often starts runs late or skips
+# them. With exact timing, cron-job.org starts the run at the chosen time, and GitHub's own
+# schedule becomes a backup a few hours later that only claims if the day's run didn't succeed.
 
 require 'json'
 require 'net/http'
@@ -111,6 +115,16 @@ module ChronoGitHub
 
   # ---------- the workflow ----------
 
+  BACKUP_DELAY = 3 * 3600 + 7 * 60 # backup run: 3h07m after the chosen time (off the busy top of the hour)
+  CHECK_REF = 'chrono4lich-token-check' # a branch that doesn't exist; see check_run_token
+
+  # local "HH:MM" -> the backup run's local "HH:MM"
+  def backup_time(local_time)
+    h, m = local_time.split(':').map(&:to_i)
+    t = (h * 3600 + m * 60 + BACKUP_DELAY) % 86_400
+    format('%02d:%02d', t / 3600, t % 3600 / 60)
+  end
+
   # local "HH:MM" today -> GitHub cron (GitHub only runs on UTC)
   def utc_cron(local_time)
     h, m = local_time.split(':').map(&:to_i)
@@ -120,7 +134,8 @@ module ChronoGitHub
   end
 
   # accounts: [{n:, name:, daily:}] - n is the secret number (ACCOUNTn/PASSWORDn)
-  def workflow_yaml(accounts, local_time)
+  # exact: cron-job.org starts the daily run; GitHub's schedule is only the backup.
+  def workflow_yaml(accounts, local_time, exact: false)
     matrix = accounts.map do |a|
       "          - account: ACCOUNT#{a[:n]}\n" \
       "            password: PASSWORD#{a[:n]}\n" \
@@ -135,16 +150,21 @@ module ChronoGitHub
       on:
         workflow_dispatch:
         schedule:
-          # #{local_time} on the computer that set this up. GitHub runs on UTC, so this shifts by an
-          # hour when daylight saving time starts or ends. Runs can also start a few minutes late.
-          - cron: "#{utc_cron(local_time)}"
+      #{schedule_comment(local_time, exact)}
+          - cron: "#{exact ? utc_cron(backup_time(local_time)) : utc_cron(local_time)}"
 
       permissions:
         contents: read
 
+      # one run at a time, so two runs never log the same characters in together
+      concurrency:
+        group: rewards
+        cancel-in-progress: false
+
       jobs:
+      #{exact ? check_job : ''}
         login-account:
-          runs-on: ubuntu-latest
+      #{exact ? "    needs: check\n    if: needs.check.outputs.skip != 'true'\n" : ''}    runs-on: ubuntu-latest
           strategy:
             fail-fast: false
             matrix:
@@ -152,7 +172,37 @@ module ChronoGitHub
       #{matrix.rstrip}
           name: rewards ${{ matrix.account }}
           steps:
-            - uses: #{ACTION}
+            # A failed claim (for example Simutronics' servers answering "internal server error")
+            # is tried again after 5 minutes, then after 15. Claiming twice is harmless.
+            - name: claim
+              id: try1
+              continue-on-error: true
+              uses: #{ACTION}
+              with:
+                account: ${{ secrets[matrix.account] }}
+                password: ${{ secrets[matrix.password] }}
+                game: GS3
+                bypass_login: ${{ matrix.bypass_login }}
+            - name: wait 5 minutes before trying again
+              if: steps.try1.outcome == 'failure'
+              run: sleep 300
+            - name: claim (try 2)
+              id: try2
+              if: steps.try1.outcome == 'failure'
+              continue-on-error: true
+              uses: #{ACTION}
+              with:
+                account: ${{ secrets[matrix.account] }}
+                password: ${{ secrets[matrix.password] }}
+                game: GS3
+                bypass_login: ${{ matrix.bypass_login }}
+            - name: wait 15 minutes before the last try
+              if: steps.try2.outcome == 'failure'
+              run: sleep 900
+            - name: claim (try 3)
+              id: try3
+              if: steps.try2.outcome == 'failure'
+              uses: #{ACTION}
               with:
                 account: ${{ secrets[matrix.account] }}
                 password: ${{ secrets[matrix.password] }}
@@ -171,6 +221,47 @@ module ChronoGitHub
               env:
                 GH_TOKEN: ${{ github.token }}
     YAML
+  end
+
+  def schedule_comment(local_time, exact)
+    lines =
+      if exact
+        ["Backup only: cron-job.org starts the daily run at #{local_time} (set up by Chrono).",
+         "This runs at #{backup_time(local_time)} and claims only if no run has succeeded in the last",
+         '12 hours. GitHub runs on UTC, so it shifts by an hour with daylight saving time.']
+      else
+        ["#{local_time} on the computer that set this up. GitHub runs on UTC, so this shifts by an",
+         'hour when daylight saving time starts or ends. GitHub may also start it late.']
+      end
+    lines.map { |l| "    # #{l}" }.join("\n")
+  end
+
+  # Backup runs check first whether the day's run already succeeded.
+  def check_job
+    <<~JOB.gsub(/^/, '  ').rstrip
+      check:
+        runs-on: ubuntu-latest
+        permissions:
+          actions: read
+        outputs:
+          skip: ${{ steps.check.outputs.skip }}
+        steps:
+          - id: check
+            env:
+              GH_TOKEN: ${{ github.token }}
+            run: |
+              skip=false
+              if [ "${{ github.event_name }}" = "schedule" ]; then
+                since=$(date -u -d '-12 hours' +%Y-%m-%dT%H:%M:%SZ)
+                n=$(gh run list -R "${{ github.repository }}" --workflow #{WORKFLOW} --status success \\
+                      --created ">=$since" --json databaseId --jq length || echo 0)
+                if [ "${n:-0}" -gt 0 ]; then
+                  skip=true
+                  echo "A run already succeeded since $since; nothing to do."
+                fi
+              fi
+              echo "skip=$skip" >> "$GITHUB_OUTPUT"
+    JOB
   end
 
   # ---------- setup, run, stop ----------
@@ -204,7 +295,9 @@ module ChronoGitHub
 
   # accounts: [{name:, password:, daily:}]. progress: called with a line of text per step.
   # Returns {repo:, login:, accounts:, cron:, time:}.
-  def sync!(token, accounts, local_time, progress: ->(_) {})
+  # first_run: start a run right away so the user can see it work (only on the first setup:
+  # with daily logins on, a run while someone is playing would disconnect them).
+  def sync!(token, accounts, local_time, exact: false, first_run: true, progress: ->(_) {})
     fail! 'No accounts are set to claim on GitHub.' if accounts.empty?
     owner = login(token)
     progress.call("Signed in to GitHub as #{owner}.")
@@ -226,14 +319,24 @@ module ChronoGitHub
       api(:delete, "/repos/#{repo}/actions/secrets/#{name}", token, ok: [204, 404])
     end
 
-    put_file(token, repo, ".github/workflows/#{WORKFLOW}", workflow_yaml(numbered, local_time),
+    put_file(token, repo, ".github/workflows/#{WORKFLOW}", workflow_yaml(numbered, local_time, exact: exact),
              'Chrono4Lich: update the rewards schedule')
-    progress.call("Wrote the daily schedule (#{local_time} here, #{utc_cron(local_time)} UTC on GitHub).")
+    if exact
+      progress.call("Wrote the daily run (started by cron-job.org at #{local_time}), with GitHub's own " \
+                    "schedule as a backup at #{backup_time(local_time)}.")
+    else
+      progress.call("Wrote the daily schedule (#{local_time} here, #{utc_cron(local_time)} UTC on GitHub).")
+    end
     api(:put, "/repos/#{repo}/actions/workflows/#{WORKFLOW}/enable", token, ok: [204, 404])
-    run_now!(token, repo, repo_data['default_branch'] || 'main')
-    progress.call('Started a first run so you can see it work.')
+    if first_run
+      run_now!(token, repo, repo_data['default_branch'] || 'main')
+      progress.call('Started a first run so you can see it work.')
+    else
+      progress.call('Updated. The next run is at the scheduled time.')
+    end
     log "GITHUB set up #{repo} for #{numbered.map { |a| a[:name] }.join(', ')} at #{local_time}"
-    { repo: repo, login: owner, accounts: numbered.map { |a| a[:name] }, cron: utc_cron(local_time), time: local_time }
+    { repo: repo, login: owner, accounts: numbered.map { |a| a[:name] }, cron: utc_cron(local_time), time: local_time,
+      branch: repo_data['default_branch'] || 'main', exact: exact }
   end
 
   def run_now!(token, repo, branch)
@@ -241,7 +344,7 @@ module ChronoGitHub
     4.times do |i|
       code, data = http(:post, "#{API}/repos/#{repo}/actions/workflows/#{WORKFLOW}/dispatches",
                         body: { ref: branch }, token: token)
-      return true if code == 204
+      return true if [200, 204].include?(code)
       raise Error, "GitHub wouldn't start the run (#{code}): #{data['message']}" unless [404, 422].include?(code) && i < 3
 
       sleep 3
@@ -260,4 +363,42 @@ module ChronoGitHub
   end
 
   def actions_url(repo) = "#{WEB}/#{repo}/actions"
+
+  # ---------- the token cron-job.org uses to start runs ----------
+
+  def dispatch_url(repo) = "#{API}/repos/#{repo}/actions/workflows/#{WORKFLOW}/dispatches"
+
+  # GitHub's page for a new fine-grained token, filled in: Actions read/write, no expiry. The
+  # user still picks the one repository it may use (GitHub's page can't preselect it).
+  def run_token_url
+    q = URI.encode_www_form(name: 'Chrono4Lich exact timing',
+                            description: "Lets cron-job.org start Chrono4Lich's daily rewards run in #{REPO_NAME}. " \
+                                         'Only for that repository; can start runs, cannot read your logins.',
+                            expires_in: 'none', actions: 'write')
+    "#{WEB}/settings/personal-access-tokens/new?#{q}"
+  end
+
+  # Checks that the token can start runs in the repository, without starting one: it asks GitHub
+  # to run the workflow on a branch that doesn't exist. GitHub checks permission first (403/404),
+  # then the branch (422), so 422 means the token works.
+  # (Whether the token is limited to this one repository can't be checked: any token can see the
+  # user's public repositories, so GitHub lists them all. The setup window asks for it instead.)
+  def check_run_token(token, repo)
+    token = token.to_s.strip
+    raise Error, 'Paste the token GitHub showed you (it starts with github_pat_).' if token.empty?
+    if token.start_with?('gho_', 'ghu_')
+      raise Error, "That's a sign-in token, not the one from GitHub's token page. Create the token on that page and paste it."
+    end
+
+    code, data = http(:post, dispatch_url(repo), body: { ref: CHECK_REF }, token: token)
+    case code
+    when 422, 200, 204 then true
+    when 401 then raise Error, 'GitHub didn\'t accept that token. Check you copied all of it, or create a new one.'
+    when 403 then raise Error, "The token can see #{repo} but can't start runs. On GitHub, edit the token: under " \
+                               'Permissions, set "Actions" to "Read and write".'
+    when 404 then raise Error, "The token can't see #{repo}. On GitHub, edit the token: under Repository access, choose " \
+                               "\"Only select repositories\" and pick #{REPO_NAME}."
+    else raise Error, "GitHub answered #{code} when checking the token: #{data['message']}"
+    end
+  end
 end

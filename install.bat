@@ -7,7 +7,7 @@ echo  Chrono setup
 echo  ============
 echo.
 
-for %%F in (chrono.rb chrono_gui.rbw chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_sealedbox.rb chrono_config.rb chrono_helper.lic chrono.ico chrono.png) do (
+for %%F in (chrono.rb chrono_gui.rbw chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_sealedbox.rb chrono_config.rb chrono_helper.lic chrono.ico chrono.png) do (
   if not exist "%%F" (
     echo  ERROR: %%F is missing. Unzip the whole Chrono4Lich folder, then run install.bat from inside it.
     goto :fail

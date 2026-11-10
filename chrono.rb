@@ -667,8 +667,62 @@ def cmd_rewards
     puts "GitHub: github.com/#{gh['repo']} (#{Array(gh['accounts']).join(', ')}), set up #{Time.at(gh['at']).strftime('%b %-d %-I:%M %p')}. " \
          "Results: #{ChronoGitHub.actions_url(gh['repo'])}"
   end
+  if (ex = Rewards.exact_state(data))
+    puts "Exact timing: cron-job.org starts the GitHub run at #{ex['time']} (#{ex['tz']}); GitHub's own schedule is a backup " \
+         "at #{ChronoGitHub.backup_time(ex['time'])}."
+  end
   why = Rewards.github_needs_update(data)
   puts "GitHub needs updating: #{why}. Run: chrono github-setup" if why
+  why = Rewards.exact_needs_update(data)
+  puts "Exact timing needs updating: #{why}. Run: chrono exact-setup" if why
+  true
+end
+
+def ask_line(prompt)
+  fail! 'This command needs a terminal to type into.' unless $stdin.tty?
+  $stdout.print prompt
+  $stdin.gets.to_s.strip
+end
+
+# chrono exact-setup: sets up (or, after the time changed, updates) cron-job.org starting the
+# GitHub run at the exact time. Asks for the GitHub token and the cron-job.org API key.
+def cmd_exact_setup
+  gh = Rewards.github_state
+  fail! 'Set up GitHub first: chrono github-setup' unless gh && gh['repo'] && !gh['stopped']
+  if Rewards.exact_state && Rewards.exact_needs_update
+    key = ask_password('cron-job.org API key (cron-job.org > Settings > API): ')
+    Rewards.exact_update_time!(key)
+    puts "cron-job.org now starts the run at #{Rewards.load['time']}."
+  else
+    puts 'Exact timing: cron-job.org (free) starts your GitHub rewards run at the exact time each day.'
+    puts
+    puts '1. Create a GitHub token for it. Open this page (already filled in):'
+    puts "   #{ChronoGitHub.run_token_url}"
+    puts "   Under Repository access choose \"Only select repositories\" and pick #{ChronoGitHub::REPO_NAME}."
+    puts '   Click "Generate token" and copy it.'
+    token = ask_password('   Paste the token: ')
+    puts '2. Make a free account at https://cron-job.org, then Settings > API > create an API key.'
+    key = ask_password('   Paste the API key: ')
+    Rewards.exact_setup!(key, token, progress: ->(line) { puts "  #{line}" })
+  end
+  if Rewards.github_needs_update
+    puts 'Now updating GitHub, so its own schedule becomes the backup:'
+    Rewards.github_sync!(github_sign_in_cli, progress: ->(line) { puts "  #{line}" })
+  end
+  puts 'Done.'
+  true
+end
+
+def cmd_exact_stop
+  fail! 'Exact timing isn\'t set up.' unless Rewards.exact_state
+  key = ask_password('cron-job.org API key, to delete the job (leave empty to delete it on cron-job.org yourself): ')
+  Rewards.exact_stop!(key.empty? ? nil : key)
+  puts key.empty? ? 'Exact timing off. Delete the "Chrono4Lich rewards" job on cron-job.org.' : 'Exact timing off.'
+  puts 'Also delete the "Chrono4Lich exact timing" token on GitHub (Settings > Developer settings > Personal access tokens).'
+  if Rewards.github_needs_update
+    puts 'Now updating GitHub, so its own schedule runs at the claim time again:'
+    Rewards.github_sync!(github_sign_in_cli, progress: ->(line) { puts "  #{line}" })
+  end
   true
 end
 
@@ -703,6 +757,12 @@ def cmd_github_stop
   token = github_sign_in_cli
   Rewards.github_stop!(token)
   puts "Done. The repository itself is still on GitHub; delete it there if you like (Settings, at the bottom)."
+  if Rewards.exact_state
+    key = ask_password('Exact timing was on. cron-job.org API key, to delete its job (leave empty to delete it yourself): ')
+    Rewards.exact_stop!(key.empty? ? nil : key)
+    puts 'Delete the "Chrono4Lich rewards" job on cron-job.org.' if key.empty?
+    puts 'Also delete the "Chrono4Lich exact timing" token on GitHub (Settings > Developer settings > Personal access tokens).'
+  end
   true
 end
 
@@ -756,6 +816,7 @@ end
 require_relative 'chrono_schedule'
 require_relative 'chrono_rewards'
 require_relative 'chrono_github'
+require_relative 'chrono_cronjob'
 
 # ---------- carrying over from lichsched (Chrono's old name) ----------
 
@@ -835,7 +896,7 @@ $stderr.sync = true
 
 opts = { realm: nil, scripts: [], timeout: nil, gap: 2 }
 parser = OptionParser.new do |o|
-  o.banner = 'Usage: chrono <list|status|login|logout|kill|add-login|change-password|remove-login|rewards|rewards-set|run-rewards|github-setup|github-stop|config|set-lich-dir> [Name ...|all] [options]'
+  o.banner = 'Usage: chrono <list|status|login|logout|kill|add-login|change-password|remove-login|rewards|rewards-set|run-rewards|github-setup|github-stop|exact-setup|exact-stop|config|set-lich-dir> [Name ...|all] [options]'
   o.on('--realm REALM', 'Realm for names saved in more than one realm') { |v| opts[:realm] = v.downcase }
   o.on('--scripts LIST', 'Comma-separated scripts to start after login') do |v|
     opts[:scripts] = v.split(',').map(&:strip).reject(&:empty?)
@@ -890,6 +951,8 @@ begin
     when 'run-rewards'     then cmd_run_rewards(names)
     when 'github-setup'    then cmd_github_setup
     when 'github-stop'     then cmd_github_stop
+    when 'exact-setup'     then cmd_exact_setup
+    when 'exact-stop'      then cmd_exact_stop
     when 'rewards'         then cmd_rewards
     when 'rewards-set'     then cmd_rewards_set(names)
     when 'add-login'       then cmd_add_login(names.first, opts[:frontend])

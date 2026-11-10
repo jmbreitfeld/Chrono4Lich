@@ -8,7 +8,7 @@ set -euo pipefail
 VERSION="${1:?usage: ./build.sh VERSION}"
 cd "$(dirname "$0")"
 FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb
-       chrono_lich_passwords.rb chrono_github.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png)
+       chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png)
 rm -rf dist build && mkdir -p dist build/win/Chrono4Lich build/linux/Chrono4Lich
 
 # Windows zip (README with Windows line endings)

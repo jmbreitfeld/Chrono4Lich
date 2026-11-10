@@ -20,7 +20,9 @@ TEMP_DIR = File.join(lich_dir, 'temp')
 
 # The few pieces of Lich that its saved-login code expects to exist.
 module Lich
-  def self.log(*) = nil
+  # Lich's code reports problems (e.g. "Error loading YAML entry file: ...") only through its log,
+  # then carries on with nothing. Pass those messages to Chrono on standard error, so it can say why.
+  def self.log(msg) = $stderr.puts("LICH-LOG #{msg}")
 
   module Util
     def self.install_gem_requirements(gems)

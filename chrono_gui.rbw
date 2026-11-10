@@ -373,6 +373,17 @@ class ChronoWindow
     row3.pack_end(stop_btn, expand: false, fill: false)
     page.pack_start(row3, expand: false, fill: false)
 
+    # Exact timing: cron-job.org starts the GitHub run on time (GitHub's own timer runs late)
+    row4 = Gtk::Box.new(:horizontal, 6)
+    @exact_btn = button('Exact timing...') { exact_dialog }
+    @action_buttons.push(@exact_btn)
+    @exact_status = Gtk::Label.new('')
+    @exact_status.xalign = 0
+    @exact_status.wrap = true
+    row4.pack_start(@exact_btn, expand: false, fill: false)
+    row4.pack_start(@exact_status, expand: true, fill: true)
+    page.pack_start(row4, expand: false, fill: false)
+
     note = Gtk::Label.new(
       'SimuCoins: your subscription bonus is offered once a month. Chrono checks every day, so it\'s ' \
       "claimed as soon as it's offered, and a day the computer was off is caught up the next time it's on.\n" \
@@ -435,6 +446,215 @@ class ChronoWindow
                "set up #{Time.at(gh['at']).strftime('%b %-d %-I:%M %p')}."
         why ? "#{text}\nNEEDS UPDATING: #{why}. Click \"Update GitHub\"." : text
       end
+    return unless @exact_status
+    ex = Rewards.exact_state(data)
+    ex_why = Rewards.exact_needs_update(data)
+    @exact_status.text =
+      if ex && ex_why
+        "NEEDS UPDATING: #{ex_why}. Click \"Exact timing\"."
+      elsif ex
+        "On: cron-job.org starts the run at #{ex['time']}#{ex['tz'] == 'UTC' ? ' (UTC-based; shifts with daylight saving)' : ''}; " \
+          "GitHub's own schedule is a backup at #{ChronoGitHub.backup_time(ex['time'])}."
+      elsif active
+        "Off. GitHub's own timer can start runs hours late. Exact timing uses a free cron-job.org account to start it on time."
+      else
+        'Available once GitHub is set up.'
+      end
+    @exact_btn.sensitive = active ? true : false
+  end
+
+  # GitHub was turned off: its cron-job.org job would only fail from now on, so remove it.
+  def exact_off_after_github_stop
+    key = secret_dialog('Remove exact timing',
+                        'GitHub claiming is off, so cron-job.org\'s daily job isn\'t needed anymore. Paste your cron-job.org ' \
+                        "API key so Chrono can delete it, or leave it empty and delete the \"#{ChronoCronJob::TITLE}\" job " \
+                        'on cron-job.org yourself.', 'cron-job.org API key:',
+                        link: ['Open cron-job.org settings', ChronoCronJob::KEY_PAGE], allow_empty: true)
+    key = '' if key.nil?
+    Rewards.exact_stop!(key.empty? ? nil : key)
+    info_dialog("#{key.empty? ? "Delete the \"#{ChronoCronJob::TITLE}\" job on cron-job.org, and" : 'Done. Also'} delete the " \
+                '"Chrono4Lich exact timing" token on GitHub: your picture (top right) > Settings > Developer settings > ' \
+                'Personal access tokens > Fine-grained tokens.')
+    reload_rewards
+  end
+
+  def info_dialog(text)
+    d = Gtk::MessageDialog.new(parent: @win, flags: :destroy_with_parent, type: :info,
+                               buttons_type: :close, message: text)
+    d.title = 'Chrono'
+    d.run
+    d.destroy
+    nil
+  end
+
+  def bold_label(text)
+    l = Gtk::Label.new
+    l.set_markup("<b>#{text.gsub('&', '&amp;').gsub('<', '&lt;')}</b>")
+    l.xalign = 0
+    l
+  end
+
+  def wrapped_label(text)
+    l = Gtk::Label.new(text)
+    l.wrap = true
+    l.xalign = 0
+    l.max_width_chars = 60
+    l
+  end
+
+  # Asks for one secret (an API key). Returns the text, or nil if cancelled.
+  def secret_dialog(title, text, field, link: nil, allow_empty: false)
+    d = Gtk::Dialog.new(title: title, parent: @win, flags: %i[modal destroy_with_parent])
+    d.add_button('Cancel', Gtk::ResponseType::CANCEL)
+    d.add_button('OK', Gtk::ResponseType::OK)
+    box = Gtk::Box.new(:vertical, 8)
+    box.margin = 14
+    d.content_area.pack_start(box, expand: true, fill: true)
+    box.pack_start(wrapped_label(text), expand: false, fill: false)
+    if link
+      b = Gtk::Button.new(label: link[0])
+      b.signal_connect('clicked') { open_url(link[1]) }
+      box.pack_start(b, expand: false, fill: false)
+    end
+    box.pack_start(wrapped_label(field), expand: false, fill: false)
+    entry = password_entry
+    entry.activates_default = true
+    box.pack_start(entry, expand: false, fill: false)
+    d.default_response = Gtk::ResponseType::OK
+    d.show_all
+    loop do
+      return (d.destroy; nil) unless d.run == Gtk::ResponseType::OK
+      value = entry.text.strip
+      if value.empty? && !allow_empty
+        error_dialog('Paste the key first.')
+        next
+      end
+      d.destroy
+      return value
+    end
+  end
+
+  # Exact timing: set it up, move it after the claim time changed, or turn it off.
+  def exact_dialog
+    data = Rewards.load
+    gh = Rewards.github_state(data)
+    return error_dialog('Set up GitHub first (Claim on GitHub, then "Set up GitHub...").') unless gh && gh['repo'] && !gh['stopped']
+    ex = Rewards.exact_state(data)
+    key_link = ['Open cron-job.org settings', ChronoCronJob::KEY_PAGE]
+    after_github = lambda do
+      reload_rewards
+      github_dialog(:sync, confirm: false) if Rewards.github_needs_update
+    end
+
+    if ex && Rewards.exact_needs_update(data)
+      key = secret_dialog('Update exact timing',
+                          "The claim time changed to #{data['time']}. Paste your cron-job.org API key so Chrono can " \
+                          'move its job (cron-job.org > Settings > API).', 'cron-job.org API key:', link: key_link)
+      return unless key
+      in_background('Updating cron-job.org...',
+                    done: ->(_) { append_log("Exact timing: cron-job.org now starts the run at #{Rewards.load['time']}."); after_github.call },
+                    failed: ->(msg) { error_dialog("Exact timing wasn't updated:\n\n#{msg}") }) do
+        Rewards.exact_update_time!(key)
+      end
+    elsif ex
+      return unless confirm_dialog("Exact timing is on: cron-job.org starts the GitHub run at #{ex['time']}.\n\n" \
+                                   'Turn it off? GitHub\'s own schedule then runs at the claim time again (you\'ll sign in ' \
+                                   'to GitHub to update it).')
+      key = secret_dialog('Turn off exact timing',
+                          'Paste your cron-job.org API key so Chrono can delete its job. Or leave it empty and delete ' \
+                          "the \"#{ChronoCronJob::TITLE}\" job on cron-job.org yourself.",
+                          'cron-job.org API key:', link: key_link, allow_empty: true)
+      return if key.nil?
+      in_background('Turning off exact timing...',
+                    done: lambda { |_|
+                      append_log('Exact timing turned off.')
+                      info_dialog("Exact timing is off.#{key.empty? ? "\n\nDelete the \"#{ChronoCronJob::TITLE}\" job on cron-job.org." : ''}\n\n" \
+                                  'Also delete the "Chrono4Lich exact timing" token on GitHub: your picture (top right) > Settings > ' \
+                                  'Developer settings > Personal access tokens > Fine-grained tokens.')
+                      after_github.call
+                    },
+                    failed: ->(msg) { error_dialog("Exact timing wasn't turned off:\n\n#{msg}") }) do
+        Rewards.exact_stop!(key.empty? ? nil : key)
+      end
+    else
+      exact_setup_dialog(gh, after_github)
+    end
+  end
+
+  def exact_setup_dialog(gh, after_github)
+    d = Gtk::Dialog.new(title: 'Exact timing', parent: @win, flags: %i[modal destroy_with_parent])
+    d.add_button('Cancel', Gtk::ResponseType::CANCEL)
+    d.add_button('Set up', Gtk::ResponseType::OK)
+    box = Gtk::Box.new(:vertical, 8)
+    box.margin = 14
+    d.content_area.pack_start(box, expand: true, fill: true)
+    box.pack_start(wrapped_label(
+      'GitHub\'s own timer often starts runs late, sometimes by hours. With exact timing, a free cron-job.org ' \
+      "account starts the run at #{Rewards.load['time']} every day, and GitHub's own schedule stays on as a backup " \
+      "#{ChronoGitHub::BACKUP_DELAY / 3600} hours later (it only claims if that day's run didn't succeed). " \
+      'Chrono doesn\'t keep the token or the key.'
+    ), expand: false, fill: false)
+
+    box.pack_start(bold_label('1. A GitHub token that can only start runs'), expand: false, fill: false)
+    box.pack_start(wrapped_label(
+      'Click the button: GitHub opens its token page with the name, expiry and permission filled in. ' \
+      'GitHub can\'t fill in one setting, so do this yourself:'
+    ), expand: false, fill: false)
+    must = Gtk::Label.new
+    must.set_markup("<b>Under \"Repository access\", choose \"Only select repositories\" and pick only " \
+                    "#{ChronoGitHub::REPO_NAME}.</b> Not \"All repositories\".")
+    must.wrap = true
+    must.xalign = 0
+    must.max_width_chars = 60
+    box.pack_start(must, expand: false, fill: false)
+    box.pack_start(wrapped_label('Then click "Generate token" and copy the token (it starts with github_pat_).'),
+                   expand: false, fill: false)
+    tb = Gtk::Button.new(label: "Open GitHub's token page")
+    tb.signal_connect('clicked') { open_url(ChronoGitHub.run_token_url) }
+    box.pack_start(tb, expand: false, fill: false)
+    token = password_entry
+    token.placeholder_text = 'Paste the GitHub token here'
+    box.pack_start(token, expand: false, fill: false)
+
+    box.pack_start(bold_label('2. A cron-job.org API key'), expand: false, fill: false)
+    box.pack_start(wrapped_label(
+      'Make a free account at cron-job.org (or sign in). Open Settings, create an API key, and copy it.'
+    ), expand: false, fill: false)
+    kb = Gtk::Button.new(label: 'Open cron-job.org')
+    kb.signal_connect('clicked') { open_url(ChronoCronJob::KEY_PAGE) }
+    box.pack_start(kb, expand: false, fill: false)
+    key = password_entry
+    key.placeholder_text = 'Paste the cron-job.org API key here'
+    box.pack_start(key, expand: false, fill: false)
+    box.pack_start(wrapped_label(
+      'After this, Chrono asks you to sign in to GitHub once more, to make GitHub\'s own schedule the backup.'
+    ), expand: false, fill: false)
+    d.show_all
+
+    loop do
+      return d.destroy unless d.run == Gtk::ResponseType::OK
+      t = token.text.strip
+      k = key.text.strip
+      if t.empty? || k.empty?
+        error_dialog('Paste both the GitHub token and the cron-job.org API key.')
+        next
+      end
+      d.destroy
+      exact_finish_setup(k, t, after_github)
+      return
+    end
+  end
+
+  def exact_finish_setup(k, t, after_github)
+    in_background('Setting up exact timing...',
+                  done: lambda { |_|
+                    ex = Rewards.exact_state
+                    append_log("Exact timing on: cron-job.org starts the run at #{ex['time']} (#{ex['tz']}).")
+                    after_github.call
+                  },
+                  failed: ->(msg) { error_dialog("Exact timing wasn't set up:\n\n#{msg}") }) do
+      Rewards.exact_setup!(k, t)
+    end
   end
 
   def open_url(url)
@@ -446,12 +666,12 @@ class ChronoWindow
 
   # Signs in to GitHub with a code, then sets up/updates (:sync) or turns off (:stop) GitHub claiming.
   # The sign-in is used for this one job and forgotten.
-  def github_dialog(purpose)
+  def github_dialog(purpose, confirm: true)
     data = Rewards.load
     if purpose == :sync
       wanted = Rewards.github_accounts(data)
       return error_dialog('Tick "Claim on GitHub" for at least one account first.') if wanted.empty?
-      return unless confirm_dialog(
+      return unless !confirm || confirm_dialog(
         "This stores the Simutronics logins for #{wanted.map { |a| a[:name] }.join(', ')} as encrypted secrets in a " \
         "private repository on your GitHub account (#{ChronoGitHub::REPO_NAME}), and claims rewards there every day " \
         "at about #{data['time']}.\n\nOnly GitHub can decrypt them, to run the claim. Chrono doesn't keep the " \
@@ -558,6 +778,9 @@ class ChronoWindow
           end
           close_btn.label = 'Close'
           safely { reload_rewards }
+          if kind == :done && purpose == :stop && Rewards.exact_state
+            GLib::Idle.add { safely { exact_off_after_github_stop }; false }
+          end
         end
       end
       !finished && !closed

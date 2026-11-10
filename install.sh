@@ -15,7 +15,7 @@ APP="$DATA_HOME/Chrono4Lich"
 OLD_APP="$DATA_HOME/lichsched"
 BIN="$HOME/.local/bin"
 DESKTOP_DIR="$DATA_HOME/applications"
-FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png README.txt uninstall.sh)
+FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png README.txt uninstall.sh)
 
 RUBY=""
 ASSUME_YES=0
