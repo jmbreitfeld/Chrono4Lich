@@ -19,6 +19,8 @@ require 'timeout'
 
 module Rewards
   FILE      = STATE_DIR && File.join(STATE_DIR, 'rewards.json')
+  HISTORY   = STATE_DIR && File.join(STATE_DIR, 'rewards_history.json')
+  HISTORY_KEEP = 3000 # entries (years of daily runs for a few accounts)
   STORE     = ENV['CHRONO_STORE_URL'] || 'https://store.play.net' # override for testing only
   SIGN_IN   = '/Account/SignIn?returnURL=%2Fstore%2Fpurchase%2Fgs'
   CLAIM     = '/Store/ClaimReward'
@@ -587,8 +589,49 @@ module Rewards
       fresh = load
       fresh['last'][name] = result
       save(fresh)
+      history_add(name, result)
     end
     all_ok
+  end
+
+  # ---------- history (rewards_history.json) ----------
+  # One entry per thing claimed (or tried): {at, account, reward, character, status, text, ok, balance}
+
+  def history
+    JSON.parse(File.read(HISTORY))
+  rescue StandardError
+    []
+  end
+
+  def history_add(account, result)
+    rows = []
+    base = { 'at' => result['at'], 'account' => account }
+    if (c = result['coins'])
+      rows << base.merge('reward' => 'SimuCoins', 'status' => c['status'], 'text' => c['message'].to_s,
+                         'ok' => c['status'] != 'error', 'balance' => c['balance'].to_s)
+    end
+    Array(result['logins']).each do |char, text, ok|
+      rows << base.merge('reward' => 'Daily login', 'character' => char, 'status' => ok ? 'ok' : 'error',
+                         'text' => text.to_s, 'ok' => ok)
+    end
+    if result['error']
+      rows << base.merge('reward' => '-', 'status' => 'error', 'text' => result['error'], 'ok' => false)
+    end
+    return if rows.empty?
+
+    list = (history + rows).last(HISTORY_KEEP)
+    FileUtils.mkdir_p(File.dirname(HISTORY))
+    tmp = "#{HISTORY}.tmp"
+    File.write(tmp, JSON.generate(list))
+    File.rename(tmp, HISTORY)
+  rescue StandardError => e
+    log "couldn't save rewards history: #{e.message}"
+  end
+
+  # Per account: the last time SimuCoins were actually claimed, with the balance then.
+  def last_coin_claims
+    history.select { |h| h['reward'] == 'SimuCoins' && h['status'] == 'claimed' }
+           .group_by { |h| h['account'] }.transform_values { |l| l.max_by { |h| h['at'] } }
   end
 
   # One line for the window's "Last result" column.

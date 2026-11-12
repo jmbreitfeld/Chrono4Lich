@@ -24,6 +24,7 @@ else
 fi
 
 rm -f "$DESKTOP_DIR/chrono.desktop"
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/chrono.desktop"   # "Open Chrono when I sign in"
 if grep -q 'chrono.rb' "$BIN/chrono" 2>/dev/null; then rm -f "$BIN/chrono"; fi
 for f in chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png \
          README.txt chrono_config.json chrono.log ruby_path uninstall.sh; do

@@ -11,6 +11,10 @@ FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_lo
        chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png)
 rm -rf dist build && mkdir -p dist build/win/Chrono4Lich build/linux/Chrono4Lich
 
+# Chrono shows its version (About, update check): stamp this release's version into it
+sed -i "s/^CHRONO_VERSION = .*/CHRONO_VERSION = '$VERSION'/" chrono.rb
+grep -q "^CHRONO_VERSION = '$VERSION'" chrono.rb || { echo "couldn't set the version in chrono.rb"; exit 1; }
+
 # Windows zip (README with Windows line endings)
 cp "${FILES[@]}" chrono.ico install.bat build/win/Chrono4Lich/
 sed 's/\r$//; s/$/\r/' README.txt > build/win/Chrono4Lich/README.txt

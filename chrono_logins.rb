@@ -261,21 +261,91 @@ module SavedLogins
   end
 
   # Removes every saved login for this character in this game (all frontends).
-  def remove(char_name, game_code, account)
+  # frontend: only the saved login for that frontend (as Chrono shows it, e.g. "warlock");
+  # nil removes the character's saved logins for every frontend.
+  def remove(char_name, game_code, account, frontend: nil)
+    fe_ok = ->(fe, cl) { frontend.nil? || shown_frontend(fe, cl) == frontend }
     if backend == :yaml
       key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
         fail! "Account #{account} isn't saved."
-      n = remove_yaml_characters(key) { |c| c['char_name'].to_s.casecmp?(char_name) && c['game_code'] == game_code }
+      n = remove_yaml_characters(key) do |c|
+        c['char_name'].to_s.casecmp?(char_name) && c['game_code'] == game_code && fe_ok.call(c['frontend'], c['custom_launch'])
+      end
     else
       list = dat_entries
       before = list.size
-      list.reject! { |e| e[:char_name].to_s.casecmp?(char_name) && e[:game_code] == game_code && e[:user_id].to_s.casecmp?(account) }
+      list.reject! do |e|
+        e[:char_name].to_s.casecmp?(char_name) && e[:game_code] == game_code && e[:user_id].to_s.casecmp?(account) &&
+          fe_ok.call(e[:frontend], e[:custom_launch])
+      end
       n = before - list.size
       write_dat(list) if n.positive?
     end
     fail! "#{char_name} isn't saved for account #{account}." if n.zero?
     log "LOGINS removed #{char_name} (#{game_code}) from account #{account}"
     n
+  end
+
+  # Removes an account and all its saved characters (what Lich's "Remove" does on an account row).
+  def remove_account(account)
+    if backend == :yaml
+      key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
+        fail! "Account #{account} isn't saved."
+      edit_yaml { |data| data['accounts'].delete(key) }
+    else
+      list = dat_entries
+      before = list.size
+      list.reject! { |e| e[:user_id].to_s.casecmp?(account) }
+      fail! "Account #{account} isn't saved." if list.size == before
+      write_dat(list)
+    end
+    log "LOGINS removed account #{account} and its characters"
+  end
+
+  # Changes one saved login's frontend (from -> to, as Chrono shows them). "warlock" saves
+  # Warlock's launch command; any other frontend clears a custom launch. Passwords aren't touched.
+  def set_frontend(account, char_name, game_code, from, to)
+    return if from == to
+
+    rec = lambda do |fe, cl, dir|
+      if to == WARLOCK
+        cmd, d = warlock_launch
+        [WARLOCK_BASE_FRONTEND, cmd, d]
+      else
+        [to, nil, nil]
+      end
+    end
+    same = ->(name, code) { name.to_s.casecmp?(char_name) && code == game_code }
+    if backend == :yaml
+      key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
+        fail! "Account #{account} isn't saved."
+      chars = load_yaml.dig('accounts', key, 'characters') || []
+      if chars.any? { |c| same.call(c['char_name'], c['game_code']) && shown_frontend(c['frontend'], c['custom_launch']) == to }
+        fail! "#{char_name} is already saved for #{to}."
+      end
+      changed = false
+      edit_yaml do |data|
+        data.dig('accounts', key, 'characters').each do |c|
+          next unless same.call(c['char_name'], c['game_code']) && shown_frontend(c['frontend'], c['custom_launch']) == from
+          next if changed
+
+          c['frontend'], c['custom_launch'], c['custom_launch_dir'] = rec.call(c['frontend'], c['custom_launch'], c['custom_launch_dir'])
+          changed = true
+        end
+      end
+    else
+      list = dat_entries
+      mine = list.select { |e| e[:user_id].to_s.casecmp?(account) && same.call(e[:char_name], e[:game_code]) }
+      fail! "#{char_name} is already saved for #{to}." if mine.any? { |e| shown_frontend(e[:frontend], e[:custom_launch]) == to }
+      e = mine.find { |x| shown_frontend(x[:frontend], x[:custom_launch]) == from }
+      changed = !e.nil?
+      if e
+        e[:frontend], e[:custom_launch], e[:custom_launch_dir] = rec.call(e[:frontend], e[:custom_launch], e[:custom_launch_dir])
+        write_dat(list)
+      end
+    end
+    fail! "#{char_name} (#{from}) isn't saved for account #{account}." unless changed
+    log "LOGINS #{char_name} (#{game_code}, #{account}): frontend #{from} -> #{to}"
   end
 
   # Adds character records with a custom launch to an account in entry.yaml (same fields Lich writes).

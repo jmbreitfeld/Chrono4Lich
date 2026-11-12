@@ -24,6 +24,8 @@ Chrono runs on your computer and has no server of its own. It collects nothing, 
 - **cron-job.org:** only if you turn on "Exact timing". Chrono creates a daily job on **your own** cron-job.org account that asks GitHub to start your rewards run. The job holds a GitHub token that can only start runs in your private rewards repository. Chrono keeps neither that token nor your cron-job.org API key.
 - **GitHub:** only if you choose "Claim on GitHub" on the Rewards tab. The logins for the accounts you pick are encrypted on your computer and stored as secrets in a **private** repository on **your own** GitHub account. Chrono never keeps your GitHub sign-in.
 
+- **GitHub update check:** when Chrono opens, it asks GitHub for the newest Chrono release. Nothing about you is sent. You can turn this off on the Settings tab.
+
 Passwords are never shown, logged, or written anywhere other than Lich's own saved-login file. Before changing that file, Chrono keeps a backup in `Lich5/data/chrono/backups`.
 
 ## Code signing policy
@@ -45,8 +47,11 @@ Found a file signed this way that you don't trust, or a problem with this policy
 
 ## Credits
 
+Chrono is by Peggyanne. It was inspired by, and works alongside, other players' work:
+
+- [simu-rewards](https://github.com/elanthia-online/simu-rewards) by **Ondreian**. Chrono's reward claiming works the same way, and "Claim on GitHub" runs it.
+- **Lich5's account manager** by **OSXLich-Doug**. Chrono's Logins tab is modeled on it.
 - [Lich5](https://github.com/elanthia-online/lich-5) by Elanthia Online. Chrono drives Lich and uses its saved logins.
-- [simu-rewards](https://github.com/elanthia-online/simu-rewards) by Ondreian. Chrono's reward claiming works the same way, and the GitHub option runs it.
 - elogin.lic, which inspired the original version.
 
 Chrono is a fan project and isn't affiliated with or endorsed by Simutronics. GemStone IV is a trademark of Simutronics Corp.

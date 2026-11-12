@@ -51,10 +51,14 @@ USING IT
     logout time, optional start scripts). Use "Test login now" to try one out.
   Rewards tab: claim your monthly subscription SimuCoins (and, if you want, each
     Prime character's daily login reward) every day at a time you pick. See REWARDS.
-  Logins tab: add accounts (type the account and password, click "Look up
-    characters", tick the ones to save), change a saved password after changing it
-    on play.net, or remove a saved login. Close Lich's login window first, or saving
-    something there may undo the change.
+  Logins tab: laid out like Lich's account manager. Click an account to open its list of
+    characters. On a character, click its Frontend to pick another from a dropdown
+    (Warlock included). "Add account..." adds an account (type the account and password,
+    click "Look up characters", tick the ones to save); "Add characters..." adds more
+    characters to the selected account; "Change password..." after changing it on
+    play.net; "Remove..." removes the selected character, or the whole account if an
+    account is selected. Close Lich's login window first, or saving something there may
+    undo the change.
     Warlock: pick "warlock" as the frontend. Lich starts Warlock with a launch command
     saved with the login (Lich's login window shows these as "stormfront" with a custom
     launch). Chrono fills the command in from a login that already uses Warlock, or with
@@ -62,7 +66,16 @@ USING IT
     Warlock in the "Warlock command" box. A character saved for Warlock and for another
     frontend logs in with Warlock.
   Settings tab: change the Lich folder, open the log folder, rebuild the
-    scheduled tasks.
+    scheduled tasks, check for updates, and "Open Chrono (minimized) when I sign in"
+    (on Windows this adds Chrono to your startup apps; uninstalling removes it).
+  Chrono remembers which characters you ticked and your start scripts for next time.
+  "About Chrono" (bottom right) shows the version and what Chrono does.
+
+UPDATES
+  When Chrono opens, it checks GitHub for a newer version. If there is one, a bar at
+  the top offers Download (opens the release page; run the new installer, your settings
+  are kept), Not now, or Skip this version. Turn the check off, or check by hand, on the
+  Settings tab. Command line: chrono version / chrono check-update
 
   Realms: Prime, Shattered and Test. (Platinum is retired; old Platinum logins still
   show up but can't be added.)
@@ -74,6 +87,10 @@ SCHEDULES - GOOD TO KNOW
   - You must be signed in to your desktop, because the game window has to open there.
     On Windows the PC can be asleep (it's woken up), but not shut down.
   - If a scheduled login or logout fails, a pop-up or notification tells you why.
+  - A schedule with no logout time is a quick login: once the game confirms a character
+    is in, Chrono waits about 45 seconds (enough to count as a login, e.g. for the daily
+    reward), then logs it out. Characters that were already online when the schedule
+    ran (you're playing them) are left alone. To stay logged in, set a logout time.
   - Only one character per account can be online at a time, so Chrono won't let
     one schedule contain two characters from the same account.
   - Everything is written to the log: Lich5/data/chrono/chrono.log
@@ -92,6 +109,9 @@ REWARDS
     Chrono didn't start would be disconnected. If a character Chrono started is online,
     that account's daily logins are skipped that day.
   - "Claim now" runs it right away; "Claim now for selected" does one account.
+  - "History..." lists everything this computer has claimed or tried, newest first,
+    with the last date SimuCoins were actually claimed for each account. (Accounts that
+    claim on GitHub: GitHub keeps those results; the History window links there.)
   - Results show in the Last result column and in chrono.log. A scheduled run that
     fails shows a pop-up (Windows) or notification (Linux) saying why.
   - The computer has to be on at the scheduled time, unless the account claims on
@@ -210,10 +230,21 @@ PRIVACY AND PASSWORDS
   - Exact timing (only if you set it up): your cron-job.org job holds a GitHub token that
     can only start runs in chrono4lich-rewards. Chrono keeps neither that token nor your
     cron-job.org API key.
+  - Update check (on unless you turn it off on the Settings tab): when Chrono opens it asks
+    GitHub (api.github.com) for the newest Chrono release. Nothing about you is sent.
   - Chrono never shows passwords, never writes them to its log, and never sends them
     anywhere except Simutronics.
   - Before changing your saved logins, Chrono backs them up to
     Lich5/data/chrono/backups (the last 10 changes).
+
+CREDITS
+  Chrono is by Peggyanne. It was inspired by, and works alongside, other players' work:
+  - simu-rewards by Ondreian (github.com/elanthia-online/simu-rewards): Chrono's reward
+    claiming works the same way, and "Claim on GitHub" runs it.
+  - Lich5's account manager by OSXLich-Doug: Chrono's Logins tab is modeled on it.
+  - Lich5 by Elanthia Online (github.com/elanthia-online/lich-5): Chrono drives Lich and
+    uses its saved logins.
+  - elogin.lic, which inspired the original version.
 
 PLAY BY THE RULES
   Logging in on a timer is just starting the game. Scripts that play while you

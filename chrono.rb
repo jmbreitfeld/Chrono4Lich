@@ -19,6 +19,9 @@
 require 'json'
 require 'fileutils'
 require 'rbconfig'
+
+# Chrono's version. The GitHub release build stamps the release's version here.
+CHRONO_VERSION = '1.8.0'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -796,6 +799,8 @@ def cmd_rewards_set(args)
   true
 end
 
+QUICK_STAY = (ENV['CHRONO_QUICK_STAY'] || 45).to_i # seconds a quick (no logout time) scheduled login stays in once the game confirms it
+
 def cmd_run_schedule(kind, name)
   fail! 'Use: run-schedule login|logout "Schedule name"' unless %w[login logout].include?(kind) && name
   s = Schedules.find(name)
@@ -807,7 +812,19 @@ def cmd_run_schedule(kind, name)
             '"Rebuild scheduled tasks" on the Settings tab.'
     end
     scripts = s['scripts'].to_s.split(',').map(&:strip).reject(&:empty?)
-    cmd_login(s["characters"], nil, scripts, 120, 2, skip_online: true)
+    # characters already online (someone is playing them) are skipped, and never logged out here
+    already = s['characters'].select { |spec| online?(spec.split(':').first) }
+    ok = cmd_login(s["characters"], nil, scripts, 120, 2, skip_online: true)
+    return ok if s['logout_at'] # logs out at its set time
+
+    # No logout time: a quick login, as a safety limit. Once the game confirms they're in, stay
+    # QUICK_STAY seconds (long enough to count as a login, e.g. for the daily reward), then log out.
+    ours = (s['characters'] - already).select { |spec| online?(spec.split(':').first) }
+    return ok if ours.empty?
+
+    log "SCHEDULE #{s['name']}: no logout time, so logging out #{ours.join(', ')} in #{QUICK_STAY}s (quick login)"
+    sleep QUICK_STAY
+    cmd_logout(ours, 90, skip_offline: true) && ok
   else
     cmd_logout(s['characters'], 90, skip_offline: true)
   end
@@ -959,6 +976,14 @@ begin
     when 'change-password' then cmd_change_password(names.first)
     when 'remove-login'    then cmd_remove_login(names.first)
     when 'list'   then cmd_list || true
+    when 'version', '--version' then puts("Chrono #{CHRONO_VERSION}") || true
+    when 'check-update'
+      rel = ChronoGitHub.latest_release
+      if rel.nil? then puts "Couldn't check for updates right now."
+      elsif ChronoGitHub.newer?(rel[:version], CHRONO_VERSION) then puts "Chrono #{rel[:version]} is available (you have #{CHRONO_VERSION}): #{rel[:url]}"
+      else puts "Chrono #{CHRONO_VERSION} is the latest version."
+      end
+      true
     when 'status' then cmd_status || true
     when 'login'  then cmd_login(names, opts[:realm], opts[:scripts], opts[:timeout] || 120, opts[:gap])
     when 'logout' then cmd_logout(names, opts[:timeout] || 90)

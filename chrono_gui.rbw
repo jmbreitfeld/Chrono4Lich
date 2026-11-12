@@ -109,6 +109,106 @@ rescue StandardError
   nil # the log is a convenience; never let it hide the real error
 end
 
+# "Open Chrono when I sign in": Windows' per-user Run list (no admin needed), or a desktop
+# autostart file on Linux. Starts minimized.
+module Autostart
+  RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+  NAME    = 'Chrono'
+
+  module_function
+
+  def gui_script = File.join(ChronoConfig::APP_DIR, 'chrono_gui.rbw')
+
+  def linux_file
+    File.join(ENV['XDG_CONFIG_HOME'] || File.join(Dir.home, '.config'), 'autostart', 'chrono.desktop')
+  end
+
+  def command
+    if ChronoConfig.windows?
+      %("#{rubyw_path.tr('/', '\\')}" "#{gui_script.tr('/', '\\')}" --minimized)
+    else
+      %("#{RbConfig.ruby}" "#{gui_script}" --minimized)
+    end
+  end
+
+  def on?
+    if ChronoConfig.windows?
+      system('reg', 'query', RUN_KEY, '/v', NAME, out: File::NULL, err: File::NULL) ? true : false
+    else
+      File.exist?(linux_file)
+    end
+  end
+
+  def enable!
+    if ChronoConfig.windows?
+      ok = system('reg', 'add', RUN_KEY, '/v', NAME, '/t', 'REG_SZ', '/d', command, '/f', out: File::NULL, err: File::NULL)
+      fail! "Windows didn't accept the startup setting (reg add failed)." unless ok
+    else
+      FileUtils.mkdir_p(File.dirname(linux_file))
+      File.write(linux_file, <<~DESKTOP)
+        [Desktop Entry]
+        Type=Application
+        Name=Chrono
+        Comment=Opens Chrono (minimized) when you sign in
+        Exec=#{command}
+        Path=#{ChronoConfig::APP_DIR}
+        Icon=#{File.join(ChronoConfig::APP_DIR, 'chrono.png')}
+        Terminal=false
+        X-GNOME-Autostart-enabled=true
+      DESKTOP
+    end
+    gui_log("autostart on: #{command}")
+  end
+
+  def disable!
+    if ChronoConfig.windows?
+      system('reg', 'delete', RUN_KEY, '/v', NAME, '/f', out: File::NULL, err: File::NULL)
+    else
+      FileUtils.rm_f(linux_file)
+    end
+    gui_log('autostart off')
+  end
+
+  # Keeps the entry pointing at this Chrono and Ruby (after an update or a new Ruby).
+  def refresh!
+    enable! if on?
+  rescue StandardError => e
+    gui_log("autostart refresh failed: #{e.message}")
+  end
+end
+
+# Window settings kept between sessions (Lich5/data/chrono/gui_settings.json): which characters
+# are ticked, the start scripts, and the update-check choices.
+module GuiPrefs
+  module_function
+
+  def file = File.join(STATE_DIR, 'gui_settings.json')
+
+  def load
+    JSON.parse(File.read(file))
+  rescue StandardError
+    {}
+  end
+
+  def get(key, default = nil)
+    v = load[key]
+    v.nil? ? default : v
+  end
+
+  def set(key, value)
+    data = load
+    return if data[key] == value
+
+    data[key] = value
+    FileUtils.mkdir_p(STATE_DIR)
+    tmp = "#{file}.tmp"
+    File.write(tmp, JSON.pretty_generate(data))
+    File.rename(tmp, file)
+  rescue StandardError => e
+    gui_log("couldn't save window settings: #{e.message}")
+  end
+end
+
 class ChronoWindow
   COL_CHECK   = 0
   COL_NAME    = 1
@@ -134,6 +234,98 @@ class ChronoWindow
     GLib::Timeout.add(200) { safely { pump_queue }; true }
     GLib::Timeout.add_seconds(3) { safely { refresh_status unless @busy_refreshing }; true }
     @win.show_all
+    @win.iconify if ARGV.include?('--minimized') # opened at sign-in
+    Autostart.refresh!
+    check_for_update(quiet: true) if GuiPrefs.get('check_updates', true)
+  end
+
+  # ---------- updates and about ----------
+
+  # Asks GitHub for the newest release in the background. quiet: only speak up if there's a
+  # newer version (and it wasn't skipped); otherwise also say "up to date" / "couldn't check".
+  def check_for_update(quiet:)
+    result = nil
+    done = false
+    Thread.new do
+      result = ChronoGitHub.latest_release
+    ensure
+      done = true
+    end
+    GLib::Timeout.add(300) do
+      next true unless done
+
+      safely { show_update_result(result, quiet) }
+      false
+    end
+  end
+
+  def show_update_result(rel, quiet)
+    if rel.nil?
+      gui_log('update check: GitHub not reachable')
+      info_dialog("Couldn't check for updates right now (GitHub didn't answer). Try again later.") unless quiet
+      return
+    end
+    unless ChronoGitHub.newer?(rel[:version], CHRONO_VERSION)
+      info_dialog("Chrono #{CHRONO_VERSION} is the latest version.") unless quiet
+      return
+    end
+    return if quiet && GuiPrefs.get('skipped_version') == rel[:version]
+
+    gui_log("update available: #{rel[:version]} (have #{CHRONO_VERSION})")
+    @update_release = rel
+    @update_label.text = "Chrono #{rel[:version]} is available. You have #{CHRONO_VERSION}."
+    @update_bar.no_show_all = false # (show_all skips a widget marked no_show_all)
+    @update_bar.show_all
+  end
+
+  def build_update_bar
+    @update_bar = Gtk::InfoBar.new
+    @update_bar.message_type = :info
+    @update_bar.no_show_all = true
+    @update_label = Gtk::Label.new('')
+    @update_label.xalign = 0
+    @update_bar.content_area.pack_start(@update_label, expand: true, fill: true)
+    @update_bar.add_button('Download', 1)
+    @update_bar.add_button('Not now', 2)
+    @update_bar.add_button('Skip this version', 3)
+    @update_bar.signal_connect('response') do |_, id|
+      safely do
+        rel = @update_release
+        case id
+        when 1
+          open_url(rel[:url])
+          append_log("Opened the download page for Chrono #{rel[:version]}. Run the installer there; your settings are kept.")
+        when 3
+          GuiPrefs.set('skipped_version', rel[:version])
+          append_log("Won't mention Chrono #{rel[:version]} again. (Settings > Check for updates now still finds it.)")
+        end
+        @update_bar.hide
+      end
+    end
+    @update_bar
+  end
+
+  def about_dialog
+    d = Gtk::AboutDialog.new
+    d.transient_for = @win
+    d.modal = true
+    d.program_name = 'Chrono'
+    d.version = CHRONO_VERSION
+    d.comments = "Logs GemStone IV characters in and out through Lich5, by hand or on a schedule.\n" \
+                 "Adds and manages Lich's saved logins (any frontend, plus Warlock).\n" \
+                 'Claims monthly SimuCoins and, if you like, daily login rewards, on this computer or on GitHub.'
+    d.website = ChronoGitHub::PROJECT_URL
+    d.website_label = 'Chrono on GitHub (downloads, help)'
+    d.authors = ['Peggyanne']
+    # "Credits" button in the About window
+    d.add_credit_section('Inspired by', ['Ondreian, author of simu-rewards (reward claiming)',
+                                         "OSXLich-Doug, author of Lich5's account manager (Logins tab)"])
+    d.add_credit_section('Built on', ['Lich5 by Elanthia Online', 'elogin.lic (the original idea)'])
+    d.copyright = 'Copyright (c) 2026 Peggyanne'
+    d.license_type = :mit_x11
+    d.logo = GdkPixbuf::Pixbuf.new(file: ICON_FILE, width: 96, height: 96) if File.exist?(ICON_FILE)
+    d.run
+    d.destroy
   end
 
   # ---------- layout ----------
@@ -147,6 +339,8 @@ class ChronoWindow
     root = Gtk::Box.new(:vertical, 8)
     root.margin = 10
     @win.add(root)
+
+    root.pack_start(build_update_bar, expand: false, fill: false)
 
     notebook = Gtk::Notebook.new
     notebook.append_page(build_characters_page, Gtk::Label.new('Characters'))
@@ -168,9 +362,12 @@ class ChronoWindow
     log_scroll.add(@log_view)
     root.pack_start(log_scroll, expand: false, fill: true)
 
+    status_row = Gtk::Box.new(:horizontal, 6)
     @status_label = Gtk::Label.new('Ready.')
     @status_label.xalign = 0
-    root.pack_start(@status_label, expand: false, fill: false)
+    status_row.pack_start(@status_label, expand: true, fill: true)
+    status_row.pack_end(button('About Chrono') { about_dialog }, expand: false, fill: false)
+    root.pack_start(status_row, expand: false, fill: false)
   end
 
   def build_characters_page
@@ -184,6 +381,7 @@ class ChronoWindow
     toggle.signal_connect('toggled') do |_, path|
       iter = @store.get_iter(path)
       iter[COL_CHECK] = !iter[COL_CHECK]
+      remember_selection
     end
     @view.append_column(Gtk::TreeViewColumn.new('', toggle, active: COL_CHECK))
     [['Character', COL_NAME], ['Realm', COL_REALM], ['Account', COL_ACCOUNT], ['Status', COL_STATUS]].each do |title, col|
@@ -209,6 +407,8 @@ class ChronoWindow
     row2.pack_start(Gtk::Label.new('Start scripts after login (comma-separated):'), expand: false, fill: false)
     @scripts_entry = Gtk::Entry.new
     @scripts_entry.placeholder_text = 'optional, e.g. go2,bigshot'
+    @scripts_entry.text = GuiPrefs.get('scripts', '').to_s
+    @scripts_entry.signal_connect('changed') { GuiPrefs.set('scripts', @scripts_entry.text) }
     row2.pack_start(@scripts_entry, expand: true, fill: true)
     outer.pack_start(row2, expand: false, fill: false)
 
@@ -348,6 +548,7 @@ class ChronoWindow
     @action_buttons.push(all, one)
     row2.pack_start(all, expand: false, fill: false)
     row2.pack_start(one, expand: false, fill: false)
+    row2.pack_end(button('History...') { rewards_history_dialog }, expand: false, fill: false)
     page.pack_start(row2, expand: false, fill: false)
 
     # GitHub: claims while this computer is off
@@ -476,6 +677,91 @@ class ChronoWindow
                 '"Chrono4Lich exact timing" token on GitHub: your picture (top right) > Settings > Developer settings > ' \
                 'Personal access tokens > Fine-grained tokens.')
     reload_rewards
+  end
+
+  # Everything this computer has claimed (or tried to), newest first, by account.
+  def rewards_history_dialog
+    all = Rewards.history.sort_by { |h| -h['at'].to_i }
+    d = Gtk::Dialog.new(title: 'Rewards history', parent: @win, flags: %i[modal destroy_with_parent])
+    d.set_default_size(720, 480)
+    d.add_button('Close', Gtk::ResponseType::CLOSE)
+    box = Gtk::Box.new(:vertical, 8)
+    box.margin = 10
+    d.content_area.pack_start(box, expand: true, fill: true)
+
+    claims = Rewards.last_coin_claims
+    head = if claims.empty?
+             'No SimuCoins claimed by this computer yet.'
+           else
+             'Last SimuCoins claimed: ' + claims.sort.map do |acct, h|
+               "#{acct} #{Time.at(h['at']).strftime('%b %-d, %Y')}#{h['balance'].to_s.empty? ? '' : " (balance #{h['balance']})"}"
+             end.join(';  ')
+           end
+    box.pack_start(wrapped_label(head), expand: false, fill: false)
+
+    filter_row = Gtk::Box.new(:horizontal, 6)
+    filter_row.pack_start(Gtk::Label.new('Show:'), expand: false, fill: false)
+    filter = Gtk::ComboBoxText.new
+    filter.append_text('All accounts')
+    all.map { |h| h['account'] }.uniq.sort.each { |a| filter.append_text(a) }
+    filter.active = 0
+    filter_row.pack_start(filter, expand: false, fill: false)
+    claimed_only = Gtk::CheckButton.new('Only claims and problems')
+    filter_row.pack_start(claimed_only, expand: false, fill: false)
+    box.pack_start(filter_row, expand: false, fill: false)
+
+    # when, account, reward, result, weight
+    store = Gtk::ListStore.new(String, String, String, String, Integer)
+    view = Gtk::TreeView.new(store)
+    [['When', 0], ['Account', 1], ['Reward', 2], ['Result', 3]].each do |title, col|
+      c = Gtk::TreeViewColumn.new(title, Gtk::CellRendererText.new, text: col, weight: 4)
+      c.resizable = true
+      c.expand = true if col == 3
+      view.append_column(c)
+    end
+    view.tooltip_column = 3
+    sw = Gtk::ScrolledWindow.new
+    sw.set_policy(:automatic, :automatic)
+    sw.add(view)
+    box.pack_start(sw, expand: true, fill: true)
+    fill = lambda do
+      store.clear
+      acct = filter.active.zero? ? nil : filter.active_text
+      all.each do |h|
+        next if acct && h['account'] != acct
+        important = h['status'] == 'claimed' || !h['ok']
+        next if claimed_only.active? && !important
+
+        it = store.append
+        it[0] = Time.at(h['at']).strftime('%Y-%m-%d %H:%M')
+        it[1] = h['account'].to_s
+        it[2] = h['character'] ? "#{h['reward']}: #{h['character']}" : h['reward'].to_s
+        it[3] = case h['status']
+                when 'claimed' then "CLAIMED #{h['text']}#{h['balance'].to_s.empty? ? '' : " (balance #{h['balance']})"}"
+                when 'not_due' then "not due yet: #{h['text']}"
+                when 'error' then "FAILED: #{h['text']}"
+                else h['text'].to_s
+                end
+        it[4] = important ? 700 : 400
+      end
+    end
+    filter.signal_connect('changed') { fill.call }
+    claimed_only.signal_connect('toggled') { fill.call }
+    fill.call
+
+    gh = Rewards.github_state
+    if gh && gh['repo'] && !gh['stopped']
+      note = Gtk::Box.new(:horizontal, 6)
+      note.pack_start(wrapped_label("Accounts that claim on GitHub (#{Array(gh['accounts']).join(', ')}) aren't listed here: " \
+                                    'GitHub keeps their results.'), expand: true, fill: true)
+      b = Gtk::Button.new(label: 'Open results on GitHub')
+      b.signal_connect('clicked') { open_url(ChronoGitHub.actions_url(gh['repo'])) }
+      note.pack_start(b, expand: false, fill: false)
+      box.pack_start(note, expand: false, fill: false)
+    end
+    d.show_all
+    d.run
+    d.destroy
   end
 
   def info_dialog(text)
@@ -814,28 +1100,43 @@ class ChronoWindow
     @logins_info.wrap = true
     page.pack_start(@logins_info, expand: false, fill: false)
 
-    # character, realm, account, frontend, game_code
-    @logins_store = Gtk::ListStore.new(String, String, String, String, String)
+    # Like Lich's account manager: each account is a row that opens to show its characters.
+    # label, realm, frontend, account, character, game_code, weight (bold for accounts)
+    @logins_store = Gtk::TreeStore.new(String, String, String, String, String, String, Integer)
     @logins_view = Gtk::TreeView.new(@logins_store)
-    [['Character', 0], ['Realm', 1], ['Account', 2], ['Frontend', 3]].each do |title, col|
-      column = Gtk::TreeViewColumn.new(title, Gtk::CellRendererText.new, text: col)
-      column.resizable = true
-      column.sort_column_id = col
-      @logins_view.append_column(column)
+    name_cell = Gtk::CellRendererText.new
+    col = Gtk::TreeViewColumn.new('Account / Character', name_cell, text: 0, weight: 6)
+    col.resizable = true
+    col.expand = true
+    @logins_view.append_column(col)
+    col = Gtk::TreeViewColumn.new('Realm', Gtk::CellRendererText.new, text: 1)
+    col.resizable = true
+    @logins_view.append_column(col)
+    @logins_view.append_column(frontend_choice_column)
+    # one click on an account opens or closes its characters
+    @logins_view.activate_on_single_click = true
+    @logins_view.signal_connect('row-activated') do |view, path, _col|
+      it = @logins_store.get_iter(path)
+      next unless it && it[4].to_s.empty?
+
+      view.row_expanded?(path) ? view.collapse_row(path) : view.expand_row(path, false)
     end
+    @logins_view.signal_connect('row-expanded') { |_, it, _| (@logins_open ||= {})[it[3].downcase] = true }
+    @logins_view.signal_connect('row-collapsed') { |_, it, _| (@logins_open ||= {}).delete(it[3].downcase) }
     scroll = Gtk::ScrolledWindow.new
     scroll.set_policy(:automatic, :automatic)
     scroll.add(@logins_view)
     page.pack_start(scroll, expand: true, fill: true)
 
     row = Gtk::Box.new(:horizontal, 6)
-    add_btn = button('Add logins...') { add_logins_dialog }
-    pw_btn  = button('Change password...') { change_password_dialog }
-    rm_btn  = button('Remove selected...') { remove_selected_login }
-    @action_buttons.push(add_btn, pw_btn, rm_btn)
-    row.pack_start(add_btn, expand: false, fill: false)
-    row.pack_start(pw_btn, expand: false, fill: false)
+    add_btn  = button('Add account...') { add_logins_dialog }
+    more_btn = button('Add characters...') { add_logins_dialog(selected_login_account) }
+    pw_btn   = button('Change password...') { change_password_dialog }
+    rm_btn   = button('Remove...') { remove_selected_login }
+    @action_buttons.push(add_btn, more_btn, pw_btn, rm_btn)
+    [add_btn, more_btn, pw_btn].each { |b| row.pack_start(b, expand: false, fill: false) }
     row.pack_end(rm_btn, expand: false, fill: false)
+    row.pack_end(button('Refresh') { safely { reload_logins } }, expand: false, fill: false)
     page.pack_start(row, expand: false, fill: false)
 
     note = Gtk::Label.new('These are the same saved logins Lich uses. Close Lich\'s login window before ' \
@@ -861,15 +1162,30 @@ class ChronoWindow
     ver = SavedLogins.lich_version
     @logins_info.text = "Saved logins are in #{kind}#{ver ? ", Lich #{ver}" : ''}."
     return unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
-    groups = SavedLogins.entries.group_by { |e| [e[:game_code], e[:char_name].downcase, e[:user_id].downcase] }
-    groups.values.map(&:first).sort_by { |e| [e[:user_id].downcase, e[:game_code], e[:char_name]] }.each do |e|
-      iter = @logins_store.append
-      iter[0] = e[:char_name]
-      iter[1] = realm_of(e)
-      iter[2] = e[:user_id]
-      # every frontend this character is saved for, e.g. "warlock, wrayth"
-      iter[3] = groups[[e[:game_code], e[:char_name].downcase, e[:user_id].downcase]].map { |x| x[:frontend] }.uniq.join(', ')
-      iter[4] = e[:game_code]
+
+    open = (@logins_open ||= {})
+    SavedLogins.entries.group_by { |e| e[:user_id].to_s }
+               .sort_by { |acct, _| acct.downcase }.each do |acct, list|
+      a = @logins_store.append(nil)
+      chars = list.map { |e| e[:char_name].to_s.downcase }.uniq.size
+      a[0] = "#{acct}   (#{chars} character#{chars == 1 ? '' : 's'})"
+      a[1] = ''
+      a[2] = ''
+      a[3] = acct
+      a[4] = ''
+      a[5] = ''
+      a[6] = 700
+      list.sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s, e[:frontend].to_s] }.each do |e|
+        c = @logins_store.append(a)
+        c[0] = e[:char_name].to_s
+        c[1] = realm_of(e)
+        c[2] = e[:frontend].to_s
+        c[3] = acct
+        c[4] = e[:char_name].to_s
+        c[5] = e[:game_code].to_s
+        c[6] = 400
+      end
+      @logins_view.expand_row(a.path, false) if open[acct.downcase]
     end
   end
 
@@ -909,8 +1225,11 @@ class ChronoWindow
     e
   end
 
-  def add_logins_dialog
-    d = Gtk::Dialog.new(title: 'Add logins', parent: @win, flags: %i[modal destroy_with_parent])
+  # prefill: an account to add characters to (its name is filled in; the password is still
+  # needed, to look up its characters with Simutronics)
+  def add_logins_dialog(prefill = nil)
+    d = Gtk::Dialog.new(title: prefill ? "Add characters to #{prefill}" : 'Add account',
+                        parent: @win, flags: %i[modal destroy_with_parent])
     d.set_default_size(480, 460)
     d.add_button('Cancel', Gtk::ResponseType::CANCEL)
     save = d.add_button('Save', Gtk::ResponseType::OK)
@@ -929,6 +1248,7 @@ class ChronoWindow
 
     account = Gtk::Entry.new
     account.hexpand = true
+    account.text = prefill.to_s
     password = password_entry
     grid.attach(label.call('Account:'), 0, 0, 1, 1)
     grid.attach(account, 1, 0, 1, 1)
@@ -1074,7 +1394,7 @@ class ChronoWindow
     combo = Gtk::ComboBoxText.new
     accounts.each { |a| combo.append_text(a) }
     sel = @logins_view.selection.selected
-    combo.active = [accounts.index { |a| sel && a.casecmp?(sel[2]) } || 0, 0].max
+    combo.active = [accounts.index { |a| sel && a.casecmp?(sel[3].to_s) } || 0, 0].max
     pw = password_entry
     pw.hexpand = true
     grid.attach(Gtk::Label.new('Account:'), 0, 0, 1, 1)
@@ -1101,21 +1421,88 @@ class ChronoWindow
     end
   end
 
+  # The account of the selected row (an account row, or a character's account), or nil.
+  def selected_login_account
+    it = @logins_view.selection.selected
+    it && it[3]
+  end
+
+  # The Frontend column: on a character row, click it for a dropdown of frontends (like Lich's).
+  def frontend_choice_column
+    choices = Gtk::ListStore.new(String)
+    (SavedLogins.frontends rescue %w[stormfront wizard]).each { |f| choices.append[0] = f }
+    cell = Gtk::CellRendererCombo.new
+    cell.model = choices
+    cell.text_column = 0
+    cell.has_entry = false
+    col = Gtk::TreeViewColumn.new('Frontend', cell, text: 2)
+    col.resizable = true
+    col.set_cell_data_func(cell) { |_c, r, _m, it| r.editable = !it[4].to_s.empty? }
+    cell.signal_connect('edited') do |_, path, new_text|
+      safely do
+        it = @logins_store.get_iter(path)
+        next unless it && !it[4].to_s.empty? && !new_text.to_s.empty? && new_text != it[2]
+
+        acct, name, code, from = it[3], it[4], it[5], it[2]
+        if online?(name)
+          error_dialog("#{name} is online. Log them out before changing the frontend.")
+          next
+        end
+        in_background("Changing #{name}'s frontend...",
+                      done: lambda { |_|
+                        append_log("#{name} (#{acct}) now uses #{new_text}#{new_text == SavedLogins::WARLOCK ? " (#{SavedLogins.warlock_launch.first})" : ''}.")
+                        logins_changed
+                      },
+                      failed: ->(msg) { error_dialog("#{name}'s frontend wasn't changed:\n\n#{msg}") }) do
+          SavedLogins.set_frontend(acct, name, code, from, new_text)
+        end
+      end
+    end
+    col
+  end
+
   def remove_selected_login
     it = @logins_view.selection.selected
-    return error_dialog('Click a login in the list first.') unless it
-    name, realm, acct, _fe, code = it[0], it[1], it[2], it[3], it[4]
-    entry = { char_name: name, game_code: code, user_id: acct }
-    check_removable!(entry)
-    return unless confirm_dialog("Remove the saved login for #{name} (#{realm}, account #{acct})?\n\n" \
-                                 'This only removes it from your saved logins. Nothing changes on your account.')
-    in_background("Removing #{name}...",
+    return error_dialog('Click an account or a character in the list first.') unless it
+
+    acct = it[3]
+    if it[4].to_s.empty?
+      remove_login_account(acct)
+    else
+      name, code, fe, realm = it[4], it[5], it[2], it[1]
+      others = SavedLogins.entries.count do |e|
+        e[:char_name].to_s.casecmp?(name) && e[:game_code] == code && e[:user_id].to_s.casecmp?(acct)
+      end
+      # the last saved login for this character: it can't be in a schedule or online
+      check_removable!({ char_name: name, game_code: code, user_id: acct }) if others <= 1
+      return unless confirm_dialog("Remove the saved login for #{name} (#{realm}, #{fe}, account #{acct})?\n\n" \
+                                   'This only removes it from your saved logins. Nothing changes on your account.')
+      in_background("Removing #{name}...",
+                    done: lambda { |_|
+                      append_log("Removed the saved login for #{name} (#{realm}, #{fe}).")
+                      logins_changed
+                    },
+                    failed: ->(msg) { error_dialog("#{name} wasn't removed:\n\n#{msg}") }) do
+        SavedLogins.remove(name, code, acct, frontend: fe)
+      end
+    end
+  end
+
+  def remove_login_account(acct)
+    list = SavedLogins.entries.select { |e| e[:user_id].to_s.casecmp?(acct) }
+    list.uniq { |e| [e[:char_name].to_s.downcase, e[:game_code]] }.each { |e| check_removable!(e) }
+    names = list.map { |e| e[:char_name] }.uniq
+    return unless confirm_dialog("Remove account #{acct} and all its saved characters (#{names.join(', ')})?\n\n" \
+                                 'This only removes them from your saved logins. Nothing changes on your account. ' \
+                                 'Its reward settings in Chrono are kept in case you add it back.')
+    in_background("Removing #{acct}...",
                   done: lambda { |_|
-                    append_log("Removed the saved login for #{name} (#{realm}).")
+                    append_log("Removed account #{acct} and its saved characters.")
+                    (@logins_open ||= {}).delete(acct.downcase)
                     logins_changed
                   },
-                  failed: ->(msg) { error_dialog("#{name} wasn't removed:\n\n#{msg}") }) do
-      SavedLogins.remove(name, code, acct)
+                  failed: ->(msg) { error_dialog("#{acct} wasn't removed:\n\n#{msg}") }) do
+      SavedLogins.remove_account(acct)
     end
   end
 
@@ -1161,6 +1548,25 @@ class ChronoWindow
     note.wrap = true
     note.xalign = 0
     page.pack_start(note, expand: false, fill: false)
+
+    start = Gtk::CheckButton.new('Open Chrono (minimized) when I sign in to this computer')
+    start.active = (Autostart.on? rescue false)
+    start.signal_connect('toggled') do
+      safely do
+        start.active? ? Autostart.enable! : Autostart.disable!
+        append_log(start.active? ? 'Chrono will open minimized when you sign in.' : "Chrono won't open when you sign in.")
+      end
+    end
+    page.pack_start(start, expand: false, fill: false)
+
+    info.call('Version', "Chrono #{CHRONO_VERSION}")
+    upd = Gtk::Box.new(:horizontal, 6)
+    auto = Gtk::CheckButton.new('Check for a new version when Chrono opens')
+    auto.active = GuiPrefs.get('check_updates', true)
+    auto.signal_connect('toggled') { GuiPrefs.set('check_updates', auto.active?) }
+    upd.pack_start(auto, expand: false, fill: false)
+    upd.pack_end(button('Check for updates now') { check_for_update(quiet: false) }, expand: false, fill: false)
+    page.pack_start(upd, expand: false, fill: false)
     page
   end
 
@@ -1204,7 +1610,7 @@ class ChronoWindow
       iter[0] = s['name']
       iter[1] = Schedules.describe_days(s['days'])
       iter[2] = s['login_at']
-      iter[3] = s['logout_at'] || '-'
+      iter[3] = s['logout_at'] || 'after ~1 min'
       iter[4] = s['characters'].map { |c| c.split(':').first }.join(', ')
       iter[5] = s['enabled'] == false ? 'off' : 'yes'
     end
@@ -1355,7 +1761,9 @@ class ChronoWindow
     enabled_check.active = existing ? existing['enabled'] != false : true
     grid.attach(enabled_check, 1, 6, 1, 1)
 
-    hint = label.call('If the logout time is earlier than the login time, the logout happens the next day.')
+    hint = label.call('If the logout time is earlier than the login time, the logout happens the next day. ' \
+                      'Without a logout time, it\'s a quick login: Chrono logs them out about a minute after ' \
+                      'they\'re in (characters you were already playing are left alone).')
     hint.wrap = true
     grid.attach(hint, 1, 7, 1, 1)
 
@@ -1398,7 +1806,7 @@ class ChronoWindow
     list << s
     Schedules.save(list)
     append_log("Saved schedule '#{s['name']}': #{Schedules.describe_days(s['days'])}, " \
-               "log in #{s['login_at']}#{s['logout_at'] ? ", log out #{s['logout_at']}" : ''}" \
+               "log in #{s['login_at']}#{s['logout_at'] ? ", log out #{s['logout_at']}" : ', log out about a minute later'}" \
                "#{s['enabled'] ? '' : ' (off)'}.")
     reload_schedules
   end
@@ -1412,7 +1820,9 @@ class ChronoWindow
   # ---------- character list ----------
 
   def reload_characters
-    checked = selected_specs
+    # first load: the characters ticked last time; later reloads: whatever is ticked now
+    checked = @characters_loaded ? selected_specs : Array(GuiPrefs.get('selected', []))
+    @characters_loaded = true
     @store.clear
     # No saved logins yet is normal for a new user, not an error: point them at the Logins tab.
     unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
@@ -1431,7 +1841,8 @@ class ChronoWindow
       iter[COL_STATUS]  = ''
       iter[COL_SPEC]    = spec
     end
-    append_log("Loaded #{shown.size} saved characters.") if checked.empty?
+    append_log("Loaded #{shown.size} saved characters.") unless @loaded_message_shown
+    @loaded_message_shown = true
   end
 
   def refresh_status
@@ -1470,6 +1881,12 @@ class ChronoWindow
 
   def set_all_checks(value)
     @store.each { |_m, _p, iter| iter[COL_CHECK] = value }
+    remember_selection
+  end
+
+  # Ticked characters are kept for next time Chrono opens.
+  def remember_selection
+    GuiPrefs.set('selected', selected_specs)
   end
 
   def selected_specs

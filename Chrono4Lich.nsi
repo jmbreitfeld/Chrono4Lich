@@ -7,7 +7,7 @@ Unicode true
 !define FOLDER    "Chrono4Lich"
 !define PUBLISHER "Peggyanne"
 !ifndef VERSION   ; the GitHub build passes the release's version with -DVERSION=x.y.z
-  !define VERSION "1.7.3"
+  !define VERSION "1.8.0"
 !endif
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${FOLDER}"
 !define APPKEY    "Software\${FOLDER}"
@@ -314,4 +314,6 @@ Section "Uninstall"
 
   DeleteRegKey HKCU "${UNINSTKEY}"
   DeleteRegKey HKCU "${APPKEY}"
+  ; "Open Chrono when I sign in" (Settings tab)
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Chrono"
 SectionEnd

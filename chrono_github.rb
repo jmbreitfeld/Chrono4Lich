@@ -27,6 +27,9 @@ module ChronoGitHub
   API       = ENV['CHRONO_GITHUB_API'] || 'https://api.github.com' # override for testing only
   SCOPES    = 'repo workflow'
   REPO_NAME = 'chrono4lich-rewards'
+  # Where Chrono itself is published (for the update check). Override for testing only.
+  PROJECT_REPO = ENV['CHRONO_PROJECT_REPO'] || 'jmbreitfeld/Chrono4Lich'
+  PROJECT_URL  = "#{WEB}/#{PROJECT_REPO}"
   WORKFLOW  = 'rewards.yml'
   ACTION    = 'elanthia-online/simu-rewards@v1'
   USER_AGENT = 'Chrono4Lich'
@@ -363,6 +366,28 @@ module ChronoGitHub
   end
 
   def actions_url(repo) = "#{WEB}/#{repo}/actions"
+
+  # ---------- Chrono's own updates ----------
+
+  # The newest published release of Chrono: {version: '1.8.1', url: release page, notes:}, or nil
+  # if GitHub can't be reached (the check is a convenience; it never gets in the way).
+  def latest_release
+    code, data = http(:get, "#{API}/repos/#{PROJECT_REPO}/releases/latest")
+    return nil unless code == 200 && data.is_a?(Hash) && data['tag_name']
+
+    version = data['tag_name'].to_s.sub(/\Av/i, '')
+    return nil unless Gem::Version.correct?(version)
+
+    { version: version, url: data['html_url'] || "#{PROJECT_URL}/releases/latest", notes: data['body'].to_s }
+  rescue StandardError
+    nil
+  end
+
+  def newer?(available, current)
+    Gem::Version.new(available) > Gem::Version.new(current)
+  rescue ArgumentError
+    false
+  end
 
   # ---------- the token cron-job.org uses to start runs ----------
 
