@@ -285,7 +285,8 @@ class ChronoWindow
     @update_label = Gtk::Label.new('')
     @update_label.xalign = 0
     @update_bar.content_area.pack_start(@update_label, expand: true, fill: true)
-    @update_bar.add_button('Download', 1)
+    @update_bar.add_button('Update now', 1)
+    @update_bar.add_button('Release page', 4)
     @update_bar.add_button('Not now', 2)
     @update_bar.add_button('Skip this version', 3)
     @update_bar.signal_connect('response') do |_, id|
@@ -293,8 +294,12 @@ class ChronoWindow
         rel = @update_release
         case id
         when 1
+          @update_bar.hide
+          update_now(rel)
+          next
+        when 4
           open_url(rel[:url])
-          append_log("Opened the download page for Chrono #{rel[:version]}. Run the installer there; your settings are kept.")
+          append_log("Opened the release page for Chrono #{rel[:version]}. Run the installer there; your settings are kept.")
         when 3
           GuiPrefs.set('skipped_version', rel[:version])
           append_log("Won't mention Chrono #{rel[:version]} again. (Settings > Check for updates now still finds it.)")
@@ -303,6 +308,38 @@ class ChronoWindow
       end
     end
     @update_bar
+  end
+
+  # Downloads this system's update, checks it, closes Chrono and starts it.
+  def update_now(rel)
+    unless ChronoUpdate.can_update_here?
+      info_dialog("This copy of Chrono was set up from the zip, so it can't update itself (the installer would " \
+                  "put a second copy somewhere else).\n\nOpening the release page: download Chrono4Lich.zip there " \
+                  'and replace this folder, or switch to the setup .exe.')
+      return open_url(rel[:url])
+    end
+    asset = ChronoUpdate.asset_for_here(rel)
+    unless asset
+      info_dialog("Chrono #{rel[:version]} has no download for this system. Opening the release page.")
+      return open_url(rel[:url])
+    end
+    what = ChronoConfig.windows? ? "start the installer (its last page can reopen Chrono)" :
+                                   'run its install.sh, then reopen itself'
+    return unless confirm_dialog("Update to Chrono #{rel[:version]}?\n\nChrono will download #{asset[:name]} " \
+                                 "(#{(asset[:size] / 1_048_576.0).round(1)} MB), check it, close, and #{what}.\n\n" \
+                                 'Characters that are logged in stay logged in, and your settings and schedules are kept.')
+    in_background("Downloading Chrono #{rel[:version]}...",
+                  done: lambda { |path|
+                    safely do
+                      ChronoUpdate.start!(path)
+                      append_log("Starting the update to Chrono #{rel[:version]}. Chrono will close now.")
+                      remember_window_size
+                      GLib::Timeout.add(800) { Gtk.main_quit; false }
+                    end
+                  },
+                  failed: ->(msg) { error_dialog("The update didn't happen:\n\n#{msg}") }) do
+      ChronoUpdate.fetch(rel)
+    end
   end
 
   def about_dialog
@@ -332,8 +369,19 @@ class ChronoWindow
 
   def build_window
     @win = Gtk::Window.new('Chrono')
-    @win.set_default_size(760, 620)
-    @win.signal_connect('delete-event') { !confirm_close }
+    # the size (and maximized or not) the window had when it was last closed
+    w, h = Array(GuiPrefs.get('window_size', [760, 620])).map(&:to_i)
+    @win.set_default_size(w.clamp(500, 10_000), h.clamp(400, 10_000))
+    @win.maximize if GuiPrefs.get('window_maximized', false)
+    @win.signal_connect('window-state-event') do |_, ev|
+      @win_maximized = ev.new_window_state.maximized?
+      false
+    end
+    @win.signal_connect('delete-event') do
+      keep_open = !confirm_close
+      remember_window_size unless keep_open
+      keep_open
+    end
     @win.signal_connect('destroy') { Gtk.main_quit }
 
     root = Gtk::Box.new(:vertical, 8)
@@ -390,12 +438,19 @@ class ChronoWindow
       column.sort_column_id = col
       @view.append_column(column)
     end
-    # A "Log in" / "Log out" link on each row: one character, whatever is ticked.
-    link = Gtk::CellRendererText.new
-    @action_col = Gtk::TreeViewColumn.new('', link)
-    @action_col.set_cell_data_func(link) do |_col, cell, _model, iter|
-      text = row_action(iter) == :login ? 'Log in' : (row_action(iter) == :logout ? 'Log out' : '')
-      cell.markup = text.empty? ? '' : "<span foreground='#1a73e8' underline='single'>#{text}</span>"
+    # A "Log in" / "Log out" button on each row: one character, whatever is ticked. A list
+    # can't hold real buttons, so it shows a picture of one, drawn by a real (off-screen) button
+    # in the current theme; clicks on it are handled below.
+    pics = row_button_images(['Log in', 'Log out'])
+    images = { login: pics['Log in'], logout: pics['Log out'] }
+    cell = Gtk::CellRendererPixbuf.new
+    cell.xpad = 4
+    cell.xalign = 0
+    @action_col = Gtk::TreeViewColumn.new('', cell)
+    @action_col.set_cell_data_func(cell) do |_col, c, _model, iter|
+      img = images[row_action(iter)]
+      c.visible = !img.nil?
+      c.pixbuf = img if img
     end
     @view.append_column(@action_col)
     @view.signal_connect('button-press-event') do |view, ev|
@@ -2059,7 +2114,38 @@ class ChronoWindow
     run_job('Log in', [args])
   end
 
-  # What the row's link does: :login when offline, :logout when online, nil while it's changing.
+  # Saves the window's size (its normal size, not the maximized one) and whether it's maximized.
+  def remember_window_size
+    GuiPrefs.set('window_maximized', @win_maximized ? true : false)
+    GuiPrefs.set('window_size', @win.size) unless @win_maximized
+  rescue StandardError => e
+    gui_log("couldn't save the window size: #{e.message}")
+  end
+
+  # Pictures of small real buttons with these labels, all the same width (a size group makes
+  # each as wide as the widest), in the current theme.
+  def row_button_images(labels)
+    css = Gtk::CssProvider.new
+    css.load(data: 'button { min-height: 0; padding: 1px 10px; }')
+    group = Gtk::SizeGroup.new(:horizontal)
+    shown = labels.map do |label|
+      b = Gtk::Button.new(label: label)
+      b.style_context.add_provider(css, Gtk::StyleProvider::PRIORITY_APPLICATION)
+      group.add_widget(b)
+      off = Gtk::OffscreenWindow.new
+      off.add(b)
+      off.show_all
+      [label, off]
+    end
+    Gtk.main_iteration_do(false) while Gtk.events_pending?
+    shown.each { |_, off| off.queue_resize }
+    Gtk.main_iteration_do(false) while Gtk.events_pending?
+    shown.to_h { |label, off| [label, off.pixbuf] }
+  ensure
+    shown&.each { |_, off| off.destroy }
+  end
+
+  # What the row's button does: :login when offline, :logout when online, nil while it's changing.
   def row_action(iter)
     status = iter[COL_STATUS].to_s
     return :login if status.empty? || status.start_with?('Offline')

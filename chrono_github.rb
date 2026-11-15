@@ -378,7 +378,8 @@ module ChronoGitHub
     version = data['tag_name'].to_s.sub(/\Av/i, '')
     return nil unless Gem::Version.correct?(version)
 
-    { version: version, url: data['html_url'] || "#{PROJECT_URL}/releases/latest", notes: data['body'].to_s }
+    assets = Array(data['assets']).map { |a| { name: a['name'].to_s, url: a['browser_download_url'].to_s, size: a['size'].to_i } }
+    { version: version, url: data['html_url'] || "#{PROJECT_URL}/releases/latest", notes: data['body'].to_s, assets: assets }
   rescue StandardError
     nil
   end

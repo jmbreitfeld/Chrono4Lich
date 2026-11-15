@@ -44,7 +44,7 @@ INSTALL ON LINUX (tested target: Pop!_OS with COSMIC; other systemd desktops sho
 
 USING IT
   Characters tab: tick characters, then Log in selected / Log out selected /
-    Log out all. Or click the "Log in" link at the end of a row to log in just that
+    Log out all. Or click the "Log in" button at the end of a row to log in just that
     character (it says "Log out" while the character is online). Ticked characters log in at the same time (each one starts two
     seconds after the last, so they don't all hit the login server at once). "Force close" is only for when a normal logout fails; the
     character may stay linkdead in the game for a while.
@@ -77,14 +77,24 @@ USING IT
   Settings tab: change the Lich folder, open the log folder, rebuild the
     scheduled tasks, check for updates, and "Open Chrono (minimized) when I sign in"
     (on Windows this adds Chrono to your startup apps; uninstalling removes it).
-  Chrono remembers which characters you ticked and your start scripts for next time.
+  Chrono remembers which characters you ticked, your start scripts, and the window's size
+  (and whether it was maximized) for next time.
   "About Chrono" (bottom right) shows the version and what Chrono does.
 
 UPDATES
-  When Chrono opens, it checks GitHub for a newer version. If there is one, a bar at
-  the top offers Download (opens the release page; run the new installer, your settings
-  are kept), Not now, or Skip this version. Turn the check off, or check by hand, on the
-  Settings tab. Command line: chrono version / chrono check-update
+  When Chrono opens, it checks GitHub for a newer version. If there is one, a bar at the
+  top offers:
+    Update now - downloads the update for this computer, checks it against the release's
+      SHA256SUMS.txt, closes Chrono and starts it. Windows: the setup .exe runs (its last
+      page can reopen Chrono). Linux: the new install.sh runs with the same Ruby, then
+      Chrono reopens (if that fails: ~/.cache/chrono/Chrono4Lich-update/install.log).
+      Characters stay logged in; settings and schedules are kept.
+      (A Windows copy set up from the zip can't update itself; Update now opens the
+      release page instead.)
+    Release page - opens the release on GitHub.
+    Not now, or Skip this version.
+  Turn the check off, or check by hand, on the Settings tab. Command line: chrono version /
+  chrono check-update
 
   Realms: Prime, Shattered and Test. (Platinum is retired; old Platinum logins still
   show up but can't be added.)

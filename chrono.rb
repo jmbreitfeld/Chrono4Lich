@@ -21,7 +21,7 @@ require 'fileutils'
 require 'rbconfig'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.8.4'
+CHRONO_VERSION = '1.8.7'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -894,6 +894,7 @@ require_relative 'chrono_schedule'
 require_relative 'chrono_rewards'
 require_relative 'chrono_github'
 require_relative 'chrono_cronjob'
+require_relative 'chrono_update'
 
 # ---------- carrying over from lichsched (Chrono's old name) ----------
 
