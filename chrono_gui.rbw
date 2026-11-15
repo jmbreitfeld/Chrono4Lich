@@ -390,6 +390,24 @@ class ChronoWindow
       column.sort_column_id = col
       @view.append_column(column)
     end
+    # A "Log in" / "Log out" link on each row: one character, whatever is ticked.
+    link = Gtk::CellRendererText.new
+    @action_col = Gtk::TreeViewColumn.new('', link)
+    @action_col.set_cell_data_func(link) do |_col, cell, _model, iter|
+      text = row_action(iter) == :login ? 'Log in' : (row_action(iter) == :logout ? 'Log out' : '')
+      cell.markup = text.empty? ? '' : "<span foreground='#1a73e8' underline='single'>#{text}</span>"
+    end
+    @view.append_column(@action_col)
+    @view.signal_connect('button-press-event') do |view, ev|
+      hit = ev.button == 1 && ev.event_type == Gdk::EventType::BUTTON_PRESS && view.get_path_at_pos(ev.x.to_i, ev.y.to_i)
+      if hit && hit[1] == @action_col
+        iter = @store.get_iter(hit[0])
+        GLib::Idle.add { safely { row_action_clicked(iter[COL_SPEC], iter[COL_NAME], row_action(iter)) }; false } if iter
+        true
+      else
+        false
+      end
+    end
     list_scroll = Gtk::ScrolledWindow.new
     list_scroll.set_policy(:automatic, :automatic)
     list_scroll.add(@view)
@@ -1141,15 +1159,15 @@ class ChronoWindow
     page.pack_start(row, expand: false, fill: false)
 
     if SavedLogins.maximize_supported?
-      @warlock_max = Gtk::CheckButton.new('Open Warlock maximized (full screen) for every Warlock login')
+      @warlock_max = Gtk::CheckButton.new('Open Warlock full screen for every Warlock login')
       @warlock_max.signal_connect('toggled') do
         next if @warlock_max_syncing
 
         on = @warlock_max.active?
-        in_background(on ? 'Turning on maximized Warlock...' : 'Turning off maximized Warlock...',
+        in_background(on ? 'Turning on full-screen Warlock...' : 'Turning off full-screen Warlock...',
                       done: lambda { |n|
                         append_log(n.zero? ? 'No Warlock logins to change.' :
-                                   "#{n} Warlock login#{n == 1 ? '' : 's'} will now open #{on ? 'maximized' : 'in a normal window'}.")
+                                   "#{n} Warlock login#{n == 1 ? '' : 's'} will now open #{on ? "full screen (#{SavedLogins.screen_area[2]}x#{SavedLogins.screen_area[3]})" : 'at the size Warlock last used'}.")
                         logins_changed
                       },
                       failed: ->(msg) { error_dialog("That didn't work:\n\n#{msg}"); safely { reload_logins } }) do
@@ -1317,7 +1335,7 @@ class ChronoWindow
     warlock_cmd.hexpand = true
     default_cmd = (SavedLogins.warlock_launch.first rescue '').to_s
     warlock_cmd.text = SavedLogins.with_maximized(default_cmd, false)
-    warlock_max = Gtk::CheckButton.new('Open Warlock maximized (full screen)')
+    warlock_max = Gtk::CheckButton.new('Open Warlock full screen')
     warlock_max.active = SavedLogins.maximized?(default_cmd)
     warlock_note = label.call('Lich runs this to start Warlock (%port% and %key% are filled in by Lich). ' \
                               'If Warlock isn\'t found when you log in, put the full path to Warlock here, ' \
@@ -1528,19 +1546,36 @@ class ChronoWindow
     cmd.hexpand = true
     cmd.width_chars = 50
     cmd.text = SavedLogins.with_maximized(current, false)
-    max = Gtk::CheckButton.new('Open Warlock maximized (full screen)')
+    max = Gtk::CheckButton.new('Open Warlock full screen')
     max.active = SavedLogins.maximized?(current)
-    warlock_bits = [cmd_label, cmd]
-    warlock_bits << max if SavedLogins.maximize_supported?
+    w0, h0 = SavedLogins.full_screen_size(current) || SavedLogins.screen_area[2, 2]
+    size_box = Gtk::Box.new(:horizontal, 6)
+    width_spin = Gtk::SpinButton.new(240, 10_000, 1)
+    width_spin.value = w0
+    height_spin = Gtk::SpinButton.new(240, 10_000, 1)
+    height_spin.value = h0
+    size_box.pack_start(Gtk::Label.new('Window size:'), expand: false, fill: false)
+    size_box.pack_start(width_spin, expand: false, fill: false)
+    size_box.pack_start(Gtk::Label.new('x'), expand: false, fill: false)
+    size_box.pack_start(height_spin, expand: false, fill: false)
+    size_note = lab.call("(your screen: #{SavedLogins.screen_area[2]} x #{SavedLogins.screen_area[3]}; lower it if Warlock comes out too big)")
+    warlock_bits = [cmd_label, cmd, max, size_box, size_note]
     warlock_bits.each { |w| w.no_show_all = true }
     grid.attach(cmd_label, 0, 2, 1, 1)
     grid.attach(cmd, 1, 2, 1, 1)
     grid.attach(max, 1, 3, 1, 1)
+    grid.attach(size_box, 1, 4, 1, 1)
+    grid.attach(size_note, 1, 5, 1, 1)
     show = lambda do
       on = frontend.active_text == SavedLogins::WARLOCK
-      warlock_bits.each { |w| on ? w.show : w.hide }
+      warlock_bits.each do |w|
+        w.no_show_all = false if on # (show_all skips a widget marked no_show_all)
+        on ? w.show_all : w.hide
+      end
+      [size_box, size_note].each(&:hide) unless on && max.active?
     end
     frontend.signal_connect('changed') { show.call }
+    max.signal_connect('toggled') { show.call }
     d.show_all
     show.call
 
@@ -1556,12 +1591,12 @@ class ChronoWindow
                        'warlock --host localhost --port %port% --key %key%')
           next
         end
-        launch = SavedLogins.with_maximized(base, SavedLogins.maximize_supported? && max.active?)
+        launch = SavedLogins.with_maximized(base, max.active?, size: [width_spin.value.to_i, height_spin.value.to_i])
       end
       d.destroy
       in_background("Saving #{name}...",
                     done: lambda { |_|
-                      append_log("#{name}: #{to}#{launch ? (SavedLogins.maximized?(launch) ? ', opens maximized' : ', normal window') : ''}.")
+                      append_log("#{name}: #{to}#{launch ? (SavedLogins.maximized?(launch) ? ", opens full screen (#{SavedLogins.full_screen_size(launch).join('x')})" : ', opens at the size Warlock last used') : ''}.")
                       logins_changed
                     },
                     failed: ->(msg) { error_dialog("#{name} wasn't changed:\n\n#{msg}") }) do
@@ -2022,6 +2057,27 @@ class ChronoWindow
     scripts = @scripts_entry.text.strip
     args += ['--scripts', scripts] unless scripts.empty?
     run_job('Log in', [args])
+  end
+
+  # What the row's link does: :login when offline, :logout when online, nil while it's changing.
+  def row_action(iter)
+    status = iter[COL_STATUS].to_s
+    return :login if status.empty? || status.start_with?('Offline')
+    return :logout if status.start_with?('Online')
+
+    nil
+  end
+
+  def row_action_clicked(spec, name, action)
+    case action
+    when :login
+      args = ['login', spec]
+      scripts = @scripts_entry.text.strip
+      args += ['--scripts', scripts] unless scripts.empty?
+      run_job("Log in #{name}", [args])
+    when :logout
+      run_job("Log out #{name}", [['logout', spec]])
+    end
   end
 
   def logout_selected

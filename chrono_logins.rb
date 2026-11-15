@@ -56,22 +56,64 @@ module SavedLogins
 
   def warlock_launch?(custom_launch) = custom_launch.to_s.downcase.include?(WARLOCK)
 
-  # "Open Warlock maximized" (Windows): Windows' start /max opens Warlock in a maximized window.
-  # Lich only fills in %port%/%key% and runs the command, then waits for Warlock to connect, so
-  # the extra step changes nothing else.
-  MAXIMIZED_PREFIX = 'cmd /c start "" /max '
+  # "Open Warlock full screen": Warlock sets its own window size (the last one it saved, or the
+  # one saved for the character), so Windows' "start maximized" has no effect on it. Warlock does
+  # take --width/--height/-x/-y, and a size given that way wins over its saved ones, so Chrono adds
+  # the screen's size (its usable area, in Warlock's "display pixels") at the top-left corner.
+  OLD_MAXIMIZED_PREFIX = 'cmd /c start "" /max ' # what Chrono 1.8.1 added; removed when seen
+  SIZE_ARGS_RE = /\s+--width\s+\d+\s+--height\s+\d+\s+-x\s+-?\d+\s+-y\s+-?\d+/
 
-  def maximize_supported? = Gem.win_platform? || ENV['CHRONO_TEST_MAXIMIZE'] == '1' # (testing only)
+  def maximize_supported? = true
 
-  def maximized?(cmd) = cmd.to_s.lstrip.downcase.start_with?(MAXIMIZED_PREFIX.downcase)
+  def maximized?(cmd) = cmd.to_s.match?(SIZE_ARGS_RE)
 
-  def with_maximized(cmd, on)
-    base = cmd.to_s.strip
-    base = base[MAXIMIZED_PREFIX.length..].to_s.strip while maximized?(base)
-    on ? "#{MAXIMIZED_PREFIX}#{base}" : base
+  # [width, height] the command asks for, or nil
+  def full_screen_size(cmd)
+    m = cmd.to_s.match(/--width\s+(\d+)\s+--height\s+(\d+)/)
+    m && [m[1].to_i, m[2].to_i]
   end
 
-  # Turns "Open Warlock maximized" on or off for every saved Warlock login. Returns how many changed.
+  # The command without any size Chrono added, then (on) with the screen's size, or the given one.
+  def with_maximized(cmd, on, size: nil)
+    base = cmd.to_s.strip
+    base = base[OLD_MAXIMIZED_PREFIX.length..].to_s.strip while base.downcase.start_with?(OLD_MAXIMIZED_PREFIX.downcase)
+    base = base.gsub(SIZE_ARGS_RE, '').strip
+    return base unless on
+
+    x, y, w, h = screen_area
+    w, h = size if size
+    "#{base} --width #{w} --height #{h} -x #{x} -y #{y}"
+  end
+
+  # The main screen's usable area (without the taskbar) as [x, y, width, height] in the units
+  # Warlock's options use (pixels at 100% display scaling).
+  def screen_area
+    @screen_area ||= detect_screen_area || [0, 0, 1920, 1040]
+  end
+
+  def detect_screen_area
+    if Gem.win_platform?
+      require 'fiddle'
+      user32 = Fiddle.dlopen('user32')
+      spi = Fiddle::Function.new(user32['SystemParametersInfoW'],
+                                 [Fiddle::TYPE_UINT, Fiddle::TYPE_UINT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_UINT], Fiddle::TYPE_INT)
+      rect = Fiddle::Pointer.malloc(16)
+      return nil if spi.call(0x30, 0, rect, 0).zero? # SPI_GETWORKAREA
+
+      l, t, r, b = rect[0, 16].unpack('l4')
+      dpi = (Fiddle::Function.new(user32['GetDpiForSystem'], [], Fiddle::TYPE_UINT).call rescue 96)
+      scale = dpi.to_i.positive? ? dpi / 96.0 : 1.0
+      [l, t, r - l, b - t].map { |v| (v / scale).round }
+    elsif defined?(Gdk::Display)
+      mon = Gdk::Display.default&.primary_monitor || Gdk::Display.default&.get_monitor(0)
+      wa = mon&.workarea
+      wa && [wa.x, wa.y, wa.width, wa.height]
+    end
+  rescue StandardError, LoadError, Fiddle::DLError
+    nil
+  end
+
+  # Turns "Open Warlock full screen" on or off for every saved Warlock login. Returns how many changed.
   def set_warlock_maximized_all(on)
     n = 0
     if backend == :yaml
@@ -79,6 +121,7 @@ module SavedLogins
         (data['accounts'] || {}).each_value do |acct|
           Array(acct['characters']).each do |c|
             next unless warlock_launch?(c['custom_launch'])
+            next if on && maximized?(c['custom_launch']) # keep a size already chosen
 
             new_cmd = with_maximized(c['custom_launch'], on)
             next if new_cmd == c['custom_launch']
@@ -92,6 +135,7 @@ module SavedLogins
       list = dat_entries
       list.each do |e|
         next unless warlock_launch?(e[:custom_launch])
+        next if on && maximized?(e[:custom_launch]) # keep a size already chosen
 
         new_cmd = with_maximized(e[:custom_launch], on)
         next if new_cmd == e[:custom_launch]

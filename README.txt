@@ -44,7 +44,8 @@ INSTALL ON LINUX (tested target: Pop!_OS with COSMIC; other systemd desktops sho
 
 USING IT
   Characters tab: tick characters, then Log in selected / Log out selected /
-    Log out all. Ticked characters log in at the same time (each one starts two
+    Log out all. Or click the "Log in" link at the end of a row to log in just that
+    character (it says "Log out" while the character is online). Ticked characters log in at the same time (each one starts two
     seconds after the last, so they don't all hit the login server at once). "Force close" is only for when a normal logout fails; the
     character may stay linkdead in the game for a while.
   Schedules tab: New... makes a schedule (characters, days, login time, optional
@@ -54,9 +55,9 @@ USING IT
   Logins tab: laid out like Lich's account manager. Click an account to open its list of
     characters. On a character, click its Frontend to pick another from a dropdown
     (Warlock included), or select it and click "Edit..." to change its frontend and,
-    for Warlock, its launch command and whether Warlock opens maximized.
-    "Open Warlock maximized (full screen) for every Warlock login" (Windows) turns that on
-    or off for all your Warlock logins at once. "Add account..." adds an account (type the account and password,
+    for Warlock, its launch command and whether Warlock opens full screen (and at what size).
+    "Open Warlock full screen for every Warlock login" turns that on or off for all your
+    Warlock logins at once. "Add account..." adds an account (type the account and password,
     click "Look up characters", tick the ones to save); "Add characters..." adds more
     characters to the selected account; "Change password..." after changing it on
     play.net; "Remove..." removes the selected character, or the whole account if an
@@ -68,9 +69,11 @@ USING IT
     Lich's standard one; if Warlock isn't found when you log in, put the full path to
     Warlock in the "Warlock command" box. A character saved for Warlock and for another
     frontend logs in with Warlock.
-    Maximized Warlock: Chrono puts  cmd /c start "" /max  in front of the Warlock command,
-    so Windows opens Warlock maximized. (Lich's "bring the game window to the front"
-    can't find a Warlock window started this way.)
+    Full-screen Warlock: Warlock sets its own window size (the last one it used), so Chrono
+    adds Warlock's own size options to the command: --width/--height of your screen (without
+    the taskbar) and -x 0 -y 0. When Chrono logs the character in (by hand or on a
+    schedule), it then maximizes Warlock's window ("Warlock - Name") once the character is
+    in, so it fills the screen exactly. Logging in from Lich's own window only gets the size.
   Settings tab: change the Lich folder, open the log folder, rebuild the
     scheduled tasks, check for updates, and "Open Chrono (minimized) when I sign in"
     (on Windows this adds Chrono to your startup apps; uninstalling removes it).

@@ -21,7 +21,7 @@ require 'fileutils'
 require 'rbconfig'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.8.1'
+CHRONO_VERSION = '1.8.4'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -427,6 +427,51 @@ def start_login(entry, scripts)
   pid
 end
 
+# ---------- full-screen Warlock (Windows) ----------
+# Warlock picks its own window size, and a window merely sized to the screen still shows Windows'
+# invisible resize borders as a small gap. So once a Warlock character is in, Chrono finds its
+# window (Warlock titles it "Warlock - Name") and maximizes it, as the maximize button would.
+module WarlockWindow
+  SW_MAXIMIZE = 3
+  WAIT = 25 # seconds to look for the window
+
+  module_function
+
+  def wanted?(entry)
+    Gem.win_platform? && entry[:frontend] == SavedLogins::WARLOCK && SavedLogins.maximized?(entry[:custom_launch])
+  end
+
+  def user32
+    @user32 ||= begin
+      require 'fiddle'
+      lib = Fiddle.dlopen('user32')
+      { find: Fiddle::Function.new(lib['FindWindowW'], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP),
+        show: Fiddle::Function.new(lib['ShowWindow'], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT], Fiddle::TYPE_INT) }
+    end
+  end
+
+  # Looks for the character's Warlock window for up to WAIT seconds and maximizes it. true if done.
+  def maximize(name)
+    title = "Warlock - #{name}\0".encode('UTF-16LE')
+    deadline = Time.now + WAIT
+    while Time.now < deadline
+      hwnd = user32[:find].call(nil, title)
+      unless hwnd.null?
+        user32[:show].call(hwnd, SW_MAXIMIZE)
+        log "LOGIN  #{name}: maximized Warlock's window"
+        return true
+      end
+      sleep 0.5
+    end
+    log "LOGIN  #{name}: didn't find a window titled \"Warlock - #{name}\" to maximize " \
+        '(a custom window title set in Warlock would explain it)'
+    false
+  rescue StandardError, LoadError => e
+    log "LOGIN  #{name}: couldn't maximize Warlock's window: #{e.message}"
+    false
+  end
+end
+
 # nil while still logging in, :online, or raises Fail
 def login_progress(name, pid, deadline, timeout)
   st = read_status(name)
@@ -455,10 +500,14 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   # Simutronics' login server and Lich's own files at the same instant), without waiting
   # for the previous one to finish logging in. Then Chrono waits for all of them.
   results = {}
-  waiting = {} # name => [pid, deadline]
+  waiting = {} # name => [pid, deadline, entry]
+  maximizers = [] # threads maximizing Warlock windows (Windows, full-screen Warlock logins)
   check = lambda do
-    waiting.to_a.each do |name, (pid, deadline)|
+    waiting.to_a.each do |name, (pid, deadline, entry)|
       next unless login_progress(name, pid, deadline, timeout)
+
+      # maximizing waits for the window, so it happens alongside the other logins
+      maximizers << Thread.new { WarlockWindow.maximize(name) } if WarlockWindow.wanted?(entry)
       results[name] = nil
       waiting.delete(name)
     rescue Fail => e
@@ -480,7 +529,7 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
     end
     launched += 1
     begin
-      waiting[name] = [start_login(entry, scripts), Time.now + timeout]
+      waiting[name] = [start_login(entry, scripts), Time.now + timeout, entry]
     rescue Fail => e
       log "!!! LOGIN #{name} FAILED: #{e.message}", $stderr
       results[name] = e.message
@@ -491,6 +540,7 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
     sleep 1 unless waiting.empty?
   end
   # summary in the order the characters were picked
+  maximizers.each(&:join)
   summarize('Login', selected.map { |e| e[:char_name] }.select { |n| results.key?(n) }.to_h { |n| [n, results[n]] })
 end
 
