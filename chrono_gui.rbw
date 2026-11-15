@@ -1131,13 +1131,33 @@ class ChronoWindow
     row = Gtk::Box.new(:horizontal, 6)
     add_btn  = button('Add account...') { add_logins_dialog }
     more_btn = button('Add characters...') { add_logins_dialog(selected_login_account) }
+    edit_btn = button('Edit...') { edit_login_dialog }
     pw_btn   = button('Change password...') { change_password_dialog }
     rm_btn   = button('Remove...') { remove_selected_login }
-    @action_buttons.push(add_btn, more_btn, pw_btn, rm_btn)
-    [add_btn, more_btn, pw_btn].each { |b| row.pack_start(b, expand: false, fill: false) }
+    @action_buttons.push(add_btn, more_btn, edit_btn, pw_btn, rm_btn)
+    [add_btn, more_btn, edit_btn, pw_btn].each { |b| row.pack_start(b, expand: false, fill: false) }
     row.pack_end(rm_btn, expand: false, fill: false)
     row.pack_end(button('Refresh') { safely { reload_logins } }, expand: false, fill: false)
     page.pack_start(row, expand: false, fill: false)
+
+    if SavedLogins.maximize_supported?
+      @warlock_max = Gtk::CheckButton.new('Open Warlock maximized (full screen) for every Warlock login')
+      @warlock_max.signal_connect('toggled') do
+        next if @warlock_max_syncing
+
+        on = @warlock_max.active?
+        in_background(on ? 'Turning on maximized Warlock...' : 'Turning off maximized Warlock...',
+                      done: lambda { |n|
+                        append_log(n.zero? ? 'No Warlock logins to change.' :
+                                   "#{n} Warlock login#{n == 1 ? '' : 's'} will now open #{on ? 'maximized' : 'in a normal window'}.")
+                        logins_changed
+                      },
+                      failed: ->(msg) { error_dialog("That didn't work:\n\n#{msg}"); safely { reload_logins } }) do
+          SavedLogins.set_warlock_maximized_all(on)
+        end
+      end
+      page.pack_start(@warlock_max, expand: false, fill: false)
+    end
 
     note = Gtk::Label.new('These are the same saved logins Lich uses. Close Lich\'s login window before ' \
                           'changing them here, or saving something in that window may undo the change. ' \
@@ -1164,6 +1184,13 @@ class ChronoWindow
     return unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
 
     open = (@logins_open ||= {})
+    if @warlock_max
+      wl = SavedLogins.entries.select { |e| e[:frontend] == SavedLogins::WARLOCK }
+      @warlock_max_syncing = true
+      @warlock_max.active = !wl.empty? && wl.all? { |e| SavedLogins.maximized?(e[:custom_launch]) }
+      @warlock_max.sensitive = !wl.empty?
+      @warlock_max_syncing = false
+    end
     SavedLogins.entries.group_by { |e| e[:user_id].to_s }
                .sort_by { |acct, _| acct.downcase }.each do |acct, list|
       a = @logins_store.append(nil)
@@ -1288,18 +1315,24 @@ class ChronoWindow
     warlock_cmd_label = label.call('Warlock command:')
     warlock_cmd = Gtk::Entry.new
     warlock_cmd.hexpand = true
-    warlock_cmd.text = (SavedLogins.warlock_launch.first rescue '')
+    default_cmd = (SavedLogins.warlock_launch.first rescue '').to_s
+    warlock_cmd.text = SavedLogins.with_maximized(default_cmd, false)
+    warlock_max = Gtk::CheckButton.new('Open Warlock maximized (full screen)')
+    warlock_max.active = SavedLogins.maximized?(default_cmd)
     warlock_note = label.call('Lich runs this to start Warlock (%port% and %key% are filled in by Lich). ' \
                               'If Warlock isn\'t found when you log in, put the full path to Warlock here, ' \
                               'in quotes if it has spaces.')
     warlock_note.wrap = true
-    [warlock_cmd_label, warlock_cmd, warlock_note].each { |w| w.no_show_all = true }
+    warlock_bits = [warlock_cmd_label, warlock_cmd, warlock_note]
+    warlock_bits << warlock_max if SavedLogins.maximize_supported?
+    warlock_bits.each { |w| w.no_show_all = true }
     grid.attach(warlock_cmd_label, 0, 6, 1, 1)
     grid.attach(warlock_cmd, 1, 6, 1, 1)
     grid.attach(warlock_note, 0, 7, 2, 1)
+    grid.attach(warlock_max, 1, 8, 1, 1)
     show_warlock = lambda do
       on = frontend.active_text == SavedLogins::WARLOCK
-      [warlock_cmd_label, warlock_cmd, warlock_note].each { |w| on ? w.show : w.hide }
+      warlock_bits.each { |w| on ? w.show : w.hide }
     end
     frontend.signal_connect('changed') { show_warlock.call }
 
@@ -1359,6 +1392,7 @@ class ChronoWindow
       acct, pw = checked_with
       fe = frontend.active_text
       launch = fe == SavedLogins::WARLOCK ? warlock_cmd.text.strip : nil
+      launch = SavedLogins.with_maximized(launch, SavedLogins.maximize_supported? && warlock_max.active?) if launch
       if launch && !(launch.include?('%port%') && launch.include?('%key%') && SavedLogins.warlock_launch?(launch))
         error_dialog("The Warlock command must mention warlock and include %port% and %key%, for example:\n\n" \
                      "warlock --host localhost --port %port% --key %key%")
@@ -1444,10 +1478,6 @@ class ChronoWindow
         next unless it && !it[4].to_s.empty? && !new_text.to_s.empty? && new_text != it[2]
 
         acct, name, code, from = it[3], it[4], it[5], it[2]
-        if online?(name)
-          error_dialog("#{name} is online. Log them out before changing the frontend.")
-          next
-        end
         in_background("Changing #{name}'s frontend...",
                       done: lambda { |_|
                         append_log("#{name} (#{acct}) now uses #{new_text}#{new_text == SavedLogins::WARLOCK ? " (#{SavedLogins.warlock_launch.first})" : ''}.")
@@ -1459,6 +1489,86 @@ class ChronoWindow
       end
     end
     col
+  end
+
+  # Edit a saved character login: its frontend and, for Warlock, the launch command and
+  # whether Warlock opens maximized.
+  def edit_login_dialog
+    it = @logins_view.selection.selected
+    return error_dialog('Click a character in the list first (open an account to see its characters).') unless it && !it[4].to_s.empty?
+
+    acct, name, code, from, realm = it[3], it[4], it[5], it[2], it[1]
+    entry = SavedLogins.entries.find do |e|
+      e[:char_name].to_s.casecmp?(name) && e[:game_code] == code && e[:user_id].to_s.casecmp?(acct) && e[:frontend] == from
+    end
+    return error_dialog("#{name} isn't saved anymore. Click Refresh.") unless entry
+
+    d = Gtk::Dialog.new(title: "Edit #{name}", parent: @win, flags: %i[modal destroy_with_parent])
+    d.add_button('Cancel', Gtk::ResponseType::CANCEL)
+    d.add_button('Save', Gtk::ResponseType::OK)
+    grid = Gtk::Grid.new
+    grid.row_spacing = 8
+    grid.column_spacing = 10
+    grid.margin = 14
+    d.content_area.pack_start(grid, expand: true, fill: true)
+    lab = ->(t) { l = Gtk::Label.new(t); l.xalign = 0; l }
+    grid.attach(lab.call('Character:'), 0, 0, 1, 1)
+    grid.attach(lab.call("#{name}  (#{realm}, account #{acct})"), 1, 0, 1, 1)
+
+    frontend = Gtk::ComboBoxText.new
+    choices = SavedLogins.frontends
+    choices.each { |f| frontend.append_text(f) }
+    frontend.active = choices.index(from) || 0
+    grid.attach(lab.call('Frontend:'), 0, 1, 1, 1)
+    grid.attach(frontend, 1, 1, 1, 1)
+
+    current = entry[:frontend] == SavedLogins::WARLOCK ? entry[:custom_launch].to_s : SavedLogins.warlock_launch.first
+    cmd_label = lab.call('Warlock command:')
+    cmd = Gtk::Entry.new
+    cmd.hexpand = true
+    cmd.width_chars = 50
+    cmd.text = SavedLogins.with_maximized(current, false)
+    max = Gtk::CheckButton.new('Open Warlock maximized (full screen)')
+    max.active = SavedLogins.maximized?(current)
+    warlock_bits = [cmd_label, cmd]
+    warlock_bits << max if SavedLogins.maximize_supported?
+    warlock_bits.each { |w| w.no_show_all = true }
+    grid.attach(cmd_label, 0, 2, 1, 1)
+    grid.attach(cmd, 1, 2, 1, 1)
+    grid.attach(max, 1, 3, 1, 1)
+    show = lambda do
+      on = frontend.active_text == SavedLogins::WARLOCK
+      warlock_bits.each { |w| on ? w.show : w.hide }
+    end
+    frontend.signal_connect('changed') { show.call }
+    d.show_all
+    show.call
+
+    loop do
+      return d.destroy unless d.run == Gtk::ResponseType::OK
+
+      to = frontend.active_text
+      launch = nil
+      if to == SavedLogins::WARLOCK
+        base = cmd.text.strip
+        unless base.include?('%port%') && base.include?('%key%') && SavedLogins.warlock_launch?(base)
+          error_dialog("The Warlock command must mention warlock and include %port% and %key%, for example:\n\n" \
+                       'warlock --host localhost --port %port% --key %key%')
+          next
+        end
+        launch = SavedLogins.with_maximized(base, SavedLogins.maximize_supported? && max.active?)
+      end
+      d.destroy
+      in_background("Saving #{name}...",
+                    done: lambda { |_|
+                      append_log("#{name}: #{to}#{launch ? (SavedLogins.maximized?(launch) ? ', opens maximized' : ', normal window') : ''}.")
+                      logins_changed
+                    },
+                    failed: ->(msg) { error_dialog("#{name} wasn't changed:\n\n#{msg}") }) do
+        SavedLogins.edit_login(acct, name, code, from, to, launch: launch)
+      end
+      return
+    end
   end
 
   def remove_selected_login
@@ -1949,8 +2059,10 @@ class ChronoWindow
         # Finish when chrono.rb exits, not when the pipe closes: anything it started
         # could still be holding the pipe open.
         _, status = Process.wait2(pid)
-        unless output.join(3)
-          @queue << [:line, '(output pipe was still held open by another process; stopped reading it)']
+        unless output.join(1)
+          # Something it started (Lich) still holds the pipe; everything chrono.rb wrote has
+          # been read by now. Nothing for the window to show.
+          gui_log("#{title}: output pipe still held by another process after chrono.rb exited")
           reader.close
           output.join(1)
         end

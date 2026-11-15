@@ -53,7 +53,10 @@ USING IT
     Prime character's daily login reward) every day at a time you pick. See REWARDS.
   Logins tab: laid out like Lich's account manager. Click an account to open its list of
     characters. On a character, click its Frontend to pick another from a dropdown
-    (Warlock included). "Add account..." adds an account (type the account and password,
+    (Warlock included), or select it and click "Edit..." to change its frontend and,
+    for Warlock, its launch command and whether Warlock opens maximized.
+    "Open Warlock maximized (full screen) for every Warlock login" (Windows) turns that on
+    or off for all your Warlock logins at once. "Add account..." adds an account (type the account and password,
     click "Look up characters", tick the ones to save); "Add characters..." adds more
     characters to the selected account; "Change password..." after changing it on
     play.net; "Remove..." removes the selected character, or the whole account if an
@@ -65,6 +68,9 @@ USING IT
     Lich's standard one; if Warlock isn't found when you log in, put the full path to
     Warlock in the "Warlock command" box. A character saved for Warlock and for another
     frontend logs in with Warlock.
+    Maximized Warlock: Chrono puts  cmd /c start "" /max  in front of the Warlock command,
+    so Windows opens Warlock maximized. (Lich's "bring the game window to the front"
+    can't find a Warlock window started this way.)
   Settings tab: change the Lich folder, open the log folder, rebuild the
     scheduled tasks, check for updates, and "Open Chrono (minimized) when I sign in"
     (on Windows this adds Chrono to your startup apps; uninstalling removes it).

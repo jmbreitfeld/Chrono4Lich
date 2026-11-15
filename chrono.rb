@@ -21,7 +21,7 @@ require 'fileutils'
 require 'rbconfig'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.8.0'
+CHRONO_VERSION = '1.8.1'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -328,7 +328,7 @@ def check_removable!(entry)
     fail! "#{entry[:char_name]} is in the schedule(s) #{in_use.map { |s| s['name'] }.join(', ')}. " \
           'Take them out of those schedules first.'
   end
-  fail! "#{entry[:char_name]} is online. Log them out first." if online?(entry[:char_name])
+  # (Online is fine: removing a saved login only affects the next login.)
 end
 
 def cmd_remove_login(spec)
@@ -410,6 +410,16 @@ def start_login(entry, scripts)
       system('sh', '-c', 'command -v systemd-run >/dev/null 2>&1')
     args = ['systemd-run', '--user', '--scope', '--quiet', '--collect',
             "--unit=chrono-lich-#{name.downcase}-#{Time.now.to_i}", *args]
+  end
+  # Windows hands every inheritable handle to a new process, including the pipe the Chrono
+  # window reads this command's output from, even with Lich's own output sent to NUL. Lich
+  # keeps running, so the window would wait on that pipe. Mark ours as not to be inherited.
+  if Gem.win_platform?
+    [$stdout, $stderr].each do |io|
+      io.close_on_exec = true
+    rescue StandardError, NotImplementedError
+      nil
+    end
   end
   pid = Process.spawn(*args, chdir: LICH_DIR, **group,
                       in: File::NULL, out: File::NULL, err: File::NULL)

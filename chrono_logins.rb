@@ -56,6 +56,55 @@ module SavedLogins
 
   def warlock_launch?(custom_launch) = custom_launch.to_s.downcase.include?(WARLOCK)
 
+  # "Open Warlock maximized" (Windows): Windows' start /max opens Warlock in a maximized window.
+  # Lich only fills in %port%/%key% and runs the command, then waits for Warlock to connect, so
+  # the extra step changes nothing else.
+  MAXIMIZED_PREFIX = 'cmd /c start "" /max '
+
+  def maximize_supported? = Gem.win_platform? || ENV['CHRONO_TEST_MAXIMIZE'] == '1' # (testing only)
+
+  def maximized?(cmd) = cmd.to_s.lstrip.downcase.start_with?(MAXIMIZED_PREFIX.downcase)
+
+  def with_maximized(cmd, on)
+    base = cmd.to_s.strip
+    base = base[MAXIMIZED_PREFIX.length..].to_s.strip while maximized?(base)
+    on ? "#{MAXIMIZED_PREFIX}#{base}" : base
+  end
+
+  # Turns "Open Warlock maximized" on or off for every saved Warlock login. Returns how many changed.
+  def set_warlock_maximized_all(on)
+    n = 0
+    if backend == :yaml
+      edit_yaml do |data|
+        (data['accounts'] || {}).each_value do |acct|
+          Array(acct['characters']).each do |c|
+            next unless warlock_launch?(c['custom_launch'])
+
+            new_cmd = with_maximized(c['custom_launch'], on)
+            next if new_cmd == c['custom_launch']
+
+            c['custom_launch'] = new_cmd
+            n += 1
+          end
+        end
+      end
+    else
+      list = dat_entries
+      list.each do |e|
+        next unless warlock_launch?(e[:custom_launch])
+
+        new_cmd = with_maximized(e[:custom_launch], on)
+        next if new_cmd == e[:custom_launch]
+
+        e[:custom_launch] = new_cmd
+        n += 1
+      end
+      write_dat(list) if n.positive?
+    end
+    log "LOGINS Warlock maximized #{on ? 'on' : 'off'} for #{n} saved login(s)"
+    n
+  end
+
   # What Chrono shows as a login's frontend: "warlock" for a Warlock custom launch.
   def shown_frontend(frontend, custom_launch)
     warlock_launch?(custom_launch) ? WARLOCK : frontend.to_s
@@ -307,10 +356,27 @@ module SavedLogins
   def set_frontend(account, char_name, game_code, from, to)
     return if from == to
 
+    edit_login(account, char_name, game_code, from, to)
+  end
+
+  # Edits one saved login: its frontend (from -> to, as Chrono shows them) and, for Warlock, its
+  # launch command (launch: nil keeps the current one, or uses warlock_launch when switching to
+  # Warlock). Passwords aren't touched.
+  def edit_login(account, char_name, game_code, from, to, launch: nil)
+    if to == WARLOCK && launch
+      launch = launch.to_s.strip
+      unless launch.include?('%port%') && launch.include?('%key%') && warlock_launch?(launch)
+        fail! 'The Warlock command must mention warlock and include %port% and %key%.'
+      end
+    end
     rec = lambda do |fe, cl, dir|
       if to == WARLOCK
-        cmd, d = warlock_launch
-        [WARLOCK_BASE_FRONTEND, cmd, d]
+        if launch then [WARLOCK_BASE_FRONTEND, launch, from == WARLOCK ? dir : warlock_launch[1]]
+        elsif from == WARLOCK then [fe, cl, dir]
+        else
+          cmd, d = warlock_launch
+          [WARLOCK_BASE_FRONTEND, cmd, d]
+        end
       else
         [to, nil, nil]
       end
@@ -320,7 +386,7 @@ module SavedLogins
       key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
         fail! "Account #{account} isn't saved."
       chars = load_yaml.dig('accounts', key, 'characters') || []
-      if chars.any? { |c| same.call(c['char_name'], c['game_code']) && shown_frontend(c['frontend'], c['custom_launch']) == to }
+      if from != to && chars.any? { |c| same.call(c['char_name'], c['game_code']) && shown_frontend(c['frontend'], c['custom_launch']) == to }
         fail! "#{char_name} is already saved for #{to}."
       end
       changed = false
@@ -336,7 +402,7 @@ module SavedLogins
     else
       list = dat_entries
       mine = list.select { |e| e[:user_id].to_s.casecmp?(account) && same.call(e[:char_name], e[:game_code]) }
-      fail! "#{char_name} is already saved for #{to}." if mine.any? { |e| shown_frontend(e[:frontend], e[:custom_launch]) == to }
+      fail! "#{char_name} is already saved for #{to}." if from != to && mine.any? { |e| shown_frontend(e[:frontend], e[:custom_launch]) == to }
       e = mine.find { |x| shown_frontend(x[:frontend], x[:custom_launch]) == from }
       changed = !e.nil?
       if e
@@ -345,7 +411,7 @@ module SavedLogins
       end
     end
     fail! "#{char_name} (#{from}) isn't saved for account #{account}." unless changed
-    log "LOGINS #{char_name} (#{game_code}, #{account}): frontend #{from} -> #{to}"
+    log "LOGINS #{char_name} (#{game_code}, #{account}): #{from == to ? "#{to} launch updated" : "frontend #{from} -> #{to}"}"
   end
 
   # Adds character records with a custom launch to an account in entry.yaml (same fields Lich writes).
