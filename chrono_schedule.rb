@@ -7,6 +7,7 @@
 
 require 'json'
 require 'open3'
+require 'fileutils'
 require 'date'
 
 module Schedules
@@ -85,20 +86,30 @@ module Schedules
   # ---------- which scheduler ----------
 
   def install!(s)
-    Gem.win_platform? ? win_install!(s) : linux_install!(s)
+    return win_install!(s) if Gem.win_platform?
+    return mac_install!(s) if ChronoConfig.mac?
+
+    linux_install!(s)
   end
 
   def uninstall!(s)
-    Gem.win_platform? ? win_uninstall!(s) : linux_uninstall!(s)
+    return win_uninstall!(s) if Gem.win_platform?
+    return mac_uninstall!(s) if ChronoConfig.mac?
+
+    linux_uninstall!(s)
   end
 
   def scheduler_name
-    Gem.win_platform? ? 'Task Scheduler' : 'systemd timers'
+    return 'Task Scheduler' if Gem.win_platform?
+    return 'launchd' if ChronoConfig.mac?
+
+    'systemd timers'
   end
 
   # Chrono used to be called lichsched. Remove a schedule's tasks or timers made under the
   # old name, so it doesn't log characters in twice.
   def remove_legacy!(s)
+    return if ChronoConfig.mac? # lichsched never ran on a Mac
     if Gem.win_platform?
       %w[login logout].each { |kind| delete_task("\\lichsched\\#{s['name']} #{kind}") }
     else
@@ -345,4 +356,118 @@ module Schedules
       </Task>
     XML
   end
+
+  # ---------- Mac: launchd agents ----------
+  # Each job is ~/Library/LaunchAgents/net.chrono4lich.<base>.plist, loaded into this user's
+  # session (so a scheduled login can open game windows). launchd runs a job missed while the Mac
+  # slept as soon as it wakes: wanted for rewards (catch_up); schedules pass --scheduled-for so a
+  # late login or logout skips itself (see too_late? in chrono.rb).
+
+  AGENT_DIR = File.join(Dir.home, 'Library', 'LaunchAgents')
+  LABEL_PREFIX = 'net.chrono4lich.'
+  LAUNCHD_DAYS = { 'sun' => 0, 'mon' => 1, 'tue' => 2, 'wed' => 3, 'thu' => 4, 'fri' => 5, 'sat' => 6 }.freeze
+  MAC_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+
+  def mac_label(base) = "#{LABEL_PREFIX}#{base}"
+  def mac_plist_path(base) = File.join(AGENT_DIR, "#{mac_label(base)}.plist")
+
+  # A property list (Apple's XML settings format) from a Hash of strings, numbers,
+  # true/false, arrays and hashes.
+  def plist_xml(hash)
+    esc = ->(v) { v.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') }
+    val = lambda do |v, ind|
+      pad = '  ' * ind
+      case v
+      when Hash
+        inner = v.map { |k, x| "#{pad}  <key>#{esc.call(k)}</key>\n#{val.call(x, ind + 1)}" }.join("\n")
+        "#{pad}<dict>\n#{inner}\n#{pad}</dict>"
+      when Array then "#{pad}<array>\n#{v.map { |x| val.call(x, ind + 1) }.join("\n")}\n#{pad}</array>"
+      when true then "#{pad}<true/>"
+      when false then "#{pad}<false/>"
+      when Integer then "#{pad}<integer>#{v}</integer>"
+      else "#{pad}<string>#{esc.call(v)}</string>"
+      end
+    end
+    <<~XML
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      #{val.call(hash, 0)}
+      </plist>
+    XML
+  end
+
+  def mac_job_plist(base, job)
+    h, m = job[:time].split(':').map(&:to_i)
+    script = File.expand_path('chrono.rb', __dir__)
+    args = [RbConfig.ruby, script, *job[:args]]
+    args += ['--scheduled-for', job[:time]] unless job[:catch_up]
+    plist_xml(
+      'Label' => mac_label(base),
+      'Comment' => job[:description],
+      'ProgramArguments' => args,
+      'WorkingDirectory' => __dir__,
+      'EnvironmentVariables' => { 'PATH' => MAC_PATH, 'LANG' => ENV['LANG'] || 'en_US.UTF-8' },
+      'StartCalendarInterval' => DAYS.select { |d| job[:days].include?(d) }
+                                     .map { |d| { 'Weekday' => LAUNCHD_DAYS[d], 'Hour' => h, 'Minute' => m } },
+      'ProcessType' => 'Interactive',
+      'AbandonProcessGroup' => true, # Lich, started by a scheduled login, keeps running after it
+      'StandardOutPath' => '/dev/null',
+      'StandardErrorPath' => '/dev/null'
+    )
+  end
+
+  def launchctl(*args)
+    out, status = Open3.capture2e('launchctl', *args)
+    [out.strip, status]
+  rescue SystemCallError
+    fail! "Couldn't run launchctl, which schedules jobs on a Mac."
+  end
+
+  def mac_unload(base)
+    launchctl('bootout', "gui/#{Process.uid}/#{mac_label(base)}") # fine if it wasn't loaded
+    launchctl('unload', mac_plist_path(base)) # (older macOS)
+  end
+
+  # Writes the job and, if enabled, loads it. A disabled job's file is removed, because macOS
+  # loads every file in LaunchAgents at sign-in.
+  def mac_write_job(base, job)
+    mac_unload(base)
+    path = mac_plist_path(base)
+    unless job[:enabled]
+      File.delete(path) if File.exist?(path)
+      log "SCHEDULE launchd job off: #{mac_label(base)}"
+      return base
+    end
+    FileUtils.mkdir_p(AGENT_DIR)
+    File.write(path, mac_job_plist(base, job))
+    out, status = launchctl('bootstrap', "gui/#{Process.uid}", path)
+    unless status.success?
+      out2, status2 = launchctl('load', '-w', path) # older macOS
+      fail! "launchctl couldn't load #{File.basename(path)}:\n#{out}\n#{out2}" unless status2.success?
+    end
+    log "SCHEDULE launchd job saved: #{mac_label(base)}"
+    base
+  end
+
+  def mac_remove(base)
+    path = mac_plist_path(base)
+    return false unless File.exist?(path)
+
+    mac_unload(base)
+    File.delete(path)
+    log "SCHEDULE launchd job removed: #{mac_label(base)}"
+    true
+  end
+
+  def mac_install!(s)
+    kinds = s['logout_at'] ? %w[login logout] : %w[login]
+    kinds.each { |kind| mac_write_job(unit_base(s, kind), schedule_job(s, kind)) }
+    mac_remove(unit_base(s, 'logout')) unless s['logout_at']
+  end
+
+  def mac_uninstall!(s)
+    %w[login logout].each { |kind| mac_remove(unit_base(s, kind)) }
+  end
+
 end

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Removes Chrono: its schedule timers, menu entry, command and files.
+# Removes Chrono (Linux or Mac): its schedule timers, menu entry, command and files.
 # Your schedules stay saved in Lich's data folder (data/chrono), so reinstalling and
 # clicking "Rebuild scheduled tasks" brings them back. Lich itself is not touched.
 
@@ -16,7 +16,7 @@ RUBY="$(cat "$APP/ruby_path" 2>/dev/null || true)"
 if [ -n "$RUBY" ] && [ -x "$RUBY" ] && [ -f "$APP/chrono.rb" ]; then
   if ! "$RUBY" "$APP/chrono.rb" remove-tasks; then
     echo "WARNING: couldn't remove the schedule timers. Remove ~/.config/systemd/user/chrono-* by hand,"
-    echo "         then run: systemctl --user daemon-reload"
+    echo "         then run: systemctl --user daemon-reload  (Mac: ~/Library/LaunchAgents/net.chrono4lich.*)"
   fi
 else
   echo "WARNING: Lich's Ruby wasn't found, so the schedule timers couldn't be removed."
@@ -24,6 +24,11 @@ else
 fi
 
 rm -f "$DESKTOP_DIR/chrono.desktop"
+if [ "$(uname -s)" = Darwin ]; then   # Mac: the app and "Open Chrono when I sign in"
+  rm -rf "$HOME/Applications/Chrono.app"
+  launchctl bootout "gui/$(id -u)/net.chrono4lich.autostart" >/dev/null 2>&1 || true
+  rm -f "$HOME/Library/LaunchAgents/net.chrono4lich.autostart.plist"
+fi
 rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/chrono.desktop"   # "Open Chrono when I sign in"
 if grep -q 'chrono.rb' "$BIN/chrono" 2>/dev/null; then rm -f "$BIN/chrono"; fi
 for f in chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_update.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png \

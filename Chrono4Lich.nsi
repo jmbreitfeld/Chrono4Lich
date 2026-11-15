@@ -7,7 +7,7 @@ Unicode true
 !define FOLDER    "Chrono4Lich"
 !define PUBLISHER "Peggyanne"
 !ifndef VERSION   ; the GitHub build passes the release's version with -DVERSION=x.y.z
-  !define VERSION "1.8.7"
+  !define VERSION "1.9.0"
 !endif
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${FOLDER}"
 !define APPKEY    "Software\${FOLDER}"

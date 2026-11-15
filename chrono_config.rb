@@ -20,6 +20,12 @@ module ChronoConfig
     Gem.win_platform?
   end
 
+  # macOS: mostly the Linux way (Homebrew's Ruby and GTK, the same install.sh), but launchd
+  # instead of systemd, and the Mac's own alerts and "open".
+  def mac?
+    RUBY_PLATFORM.include?('darwin')
+  end
+
   # Paths are kept with / internally; show them the way the system writes them.
   def disp(path)
     windows? ? path.to_s.tr('/', '\\') : path.to_s

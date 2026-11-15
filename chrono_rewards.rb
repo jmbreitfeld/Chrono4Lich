@@ -250,7 +250,9 @@ module Rewards
   end
 
   def install_task!(data = load)
-    if Gem.win_platform?
+    if ChronoConfig.mac?
+      data['enabled'] ? Schedules.mac_write_job(UNIT_BASE, job(data)) : Schedules.mac_remove(UNIT_BASE)
+    elsif Gem.win_platform?
       tn = "#{Schedules::TASK_FOLDER}#{TASK_NAME}"
       data['enabled'] ? Schedules.create_task(tn, Schedules.task_xml(job(data))) : Schedules.delete_task(tn)
     elsif data['enabled']
@@ -264,7 +266,9 @@ module Rewards
   end
 
   def uninstall_task!
-    if Gem.win_platform?
+    if ChronoConfig.mac?
+      Schedules.mac_remove(UNIT_BASE)
+    elsif Gem.win_platform?
       Schedules.delete_task("#{Schedules::TASK_FOLDER}#{TASK_NAME}")
     elsif Schedules.linux_remove_base(UNIT_BASE)
       Schedules.systemctl!('daemon-reload')

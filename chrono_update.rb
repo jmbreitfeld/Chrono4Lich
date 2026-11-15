@@ -3,8 +3,8 @@
 #
 #   Windows (installed with the setup .exe): runs the new Chrono4Lich-setup-X.exe; its last page
 #     offers "Open Chrono now".
-#   Linux: unpacks Chrono4Lich-linux.tar.gz and runs its install.sh with the same Ruby, then
-#     reopens Chrono.
+#   Linux / Mac: unpacks Chrono4Lich-linux.tar.gz / Chrono4Lich-mac.tar.gz and runs its install.sh
+#     with the same Ruby, then reopens Chrono.
 #   Windows copies set up from the zip can't update this way (the installer would make a second
 #     copy elsewhere), so for those Chrono opens the release page instead.
 
@@ -30,8 +30,19 @@ module ChronoUpdate
 
   # The release file for this system: {name:, url:, size:} or nil
   def asset_for_here(release)
-    want = ChronoConfig.windows? ? /\AChrono4Lich-setup-[\d.]+\.exe\z/i : /\AChrono4Lich-linux\.tar\.gz\z/i
-    release[:assets].find { |a| a[:name].match?(want) }
+    want = if ChronoConfig.windows? then /\AChrono4Lich-setup-[\d.]+\.exe\z/i
+           elsif ChronoConfig.mac? then /\AChrono4Lich-mac\.tar\.gz\z/i
+           else /\AChrono4Lich-linux\.tar\.gz\z/i
+           end
+    release[:assets].find { |a| a[:name].match?(want) } ||
+      (ChronoConfig.mac? && release[:assets].find { |a| a[:name].match?(/\AChrono4Lich-linux\.tar\.gz\z/i) }) # same files
+  end
+
+  def system_name
+    return 'Windows' if ChronoConfig.windows?
+    return 'Mac' if ChronoConfig.mac?
+
+    'Linux'
   end
 
   def update_dir
@@ -77,7 +88,7 @@ module ChronoUpdate
   # Downloads this system's file from the release and checks it. Returns its path.
   def fetch(release, progress: ->(_done, _total) {})
     asset = asset_for_here(release) or
-      raise Error, "Release #{release[:version]} has no download for #{ChronoConfig.windows? ? 'Windows' : 'Linux'}."
+      raise Error, "Release #{release[:version]} has no download for #{system_name}."
     sums = release[:assets].find { |a| a[:name] == SUMS } or
       raise Error, "Release #{release[:version]} has no #{SUMS}, so the download can't be checked. Use the release page."
     dir = update_dir
@@ -122,7 +133,8 @@ module ChronoUpdate
                  "{ #{q.call(ruby)} #{q.call(File.join(app, 'chrono_gui.rbw'))} >/dev/null 2>&1 & }"
     script = "sleep 2; cd #{q.call(src)} && bash ./install.sh --ruby #{q.call(ruby)} --yes > #{q.call(log_file)} 2>&1 " \
              "&& #{relaunch} " \
-             "|| { command -v notify-send >/dev/null && notify-send 'Chrono update failed' 'See #{log_file}'; }"
+             "|| { command -v notify-send >/dev/null && notify-send 'Chrono update failed' 'See #{log_file}'; " \
+             "command -v osascript >/dev/null && osascript -e 'display alert \"Chrono update failed\" message \"See the install.log in ~/.cache/chrono\"'; }"
     pid = Process.spawn('bash', '-c', script, chdir: src, pgroup: true, in: File::NULL, out: File::NULL, err: File::NULL)
     Process.detach(pid)
     log "UPDATE running install.sh from #{File.basename(path)} (log: #{log_file})"

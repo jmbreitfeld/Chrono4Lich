@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Chrono installer for Linux. Run from the unpacked Chrono4Lich folder:
+# Chrono installer for Linux and Mac. Run from the unpacked Chrono4Lich folder:
 #   ./install.sh            (asks before using the Ruby it finds)
 #   ./install.sh --ruby /path/to/ruby --yes
 #
-# Installs for your user only (no sudo) into ~/.local/share/Chrono4Lich, adds a menu
-# entry and a "chrono" command. Run it again to upgrade; your settings are kept.
+# Installs for your user only (no sudo) into ~/.local/share/Chrono4Lich, adds a menu entry
+# (Mac: Chrono in your Applications folder) and a "chrono" command. Run it again to upgrade;
+# your settings are kept.
 # If lichsched (Chrono's old name) is installed, it's replaced and its schedules carried over.
 
 set -euo pipefail
@@ -16,6 +17,10 @@ OLD_APP="$DATA_HOME/lichsched"
 BIN="$HOME/.local/bin"
 DESKTOP_DIR="$DATA_HOME/applications"
 FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_update.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png README.txt uninstall.sh)
+
+IS_MAC=0
+[ "$(uname -s)" = Darwin ] && IS_MAC=1
+MAC_APP="$HOME/Applications/Chrono.app"
 
 RUBY=""
 ASSUME_YES=0
@@ -49,23 +54,35 @@ done
 # Turn whatever we're given (a shim, a symlink) into the real ruby binary, since the
 # menu entry and the timers run without your shell's PATH.
 resolve_ruby() { "$1" -e 'print RbConfig.ruby' 2>/dev/null; }
+has_gtk() { "$1" -e "require 'gtk3'" >/dev/null 2>&1; }
+newest() { # the last of a list of version folders, in version order (sort -V isn't everywhere)
+  local list; list="$(cat)"; [ -n "$list" ] || return 0
+  { printf '%s\n' "$list" | sort -V 2>/dev/null || printf '%s\n' "$list" | sort; } | tail -n 1
+}
 
 if [ -z "$RUBY" ] && [ -f "$APP/ruby_path" ]; then
   prev="$(cat "$APP/ruby_path")"
   [ -x "$prev" ] && RUBY="$prev" && say " Using the same Ruby as last time: $RUBY"
 fi
 if [ -z "$RUBY" ]; then
+  # Lich needs a Ruby with GTK3. On a Mac that's usually Homebrew's, not Apple's own old Ruby
+  # in /usr/bin, so a Ruby that has GTK3 is offered first.
+  first=""
   for c in "$(command -v ruby 2>/dev/null || true)" \
-           $(ls -d "$HOME"/.rbenv/versions/*/bin/ruby 2>/dev/null | sort -V | tail -n 1) \
-           $(ls -d "$HOME"/.asdf/installs/ruby/*/bin/ruby 2>/dev/null | sort -V | tail -n 1) \
+           "$(ls -d "$HOME"/.rbenv/versions/*/bin/ruby 2>/dev/null | newest)" \
+           "$(ls -d "$HOME"/.asdf/installs/ruby/*/bin/ruby 2>/dev/null | newest)" \
+           /opt/homebrew/opt/ruby/bin/ruby /usr/local/opt/ruby/bin/ruby \
            /usr/local/bin/ruby /usr/bin/ruby; do
     [ -n "$c" ] && [ -x "$c" ] || continue
     real="$(resolve_ruby "$c" || true)"
     [ -n "$real" ] || continue
-    say " Found Ruby: $real ($("$real" -e 'print RUBY_VERSION'))"
+    [ -n "$first" ] || first="$real"
+    has_gtk "$real" || continue
+    say " Found Ruby with GTK: $real ($("$real" -e 'print RUBY_VERSION'))"
     if ask " Use this Ruby? This should be the one you run Lich with."; then RUBY="$real"; fi
     break
   done
+  if [ -z "$RUBY" ] && [ -n "$first" ] && [ "$ASSUME_YES" = 1 ]; then RUBY="$first"; fi # fails the GTK check below, with help
 fi
 while [ -z "$RUBY" ]; do
   [ "$ASSUME_YES" = 1 ] && fail "No Ruby found. Run again with --ruby /path/to/ruby."
@@ -76,7 +93,14 @@ REAL="$(resolve_ruby "$RUBY" || true)"
 RUBY="$REAL"
 
 say " Checking that this Ruby has GTK, which the window needs..."
-if ! "$RUBY" -e "require 'gtk3'" >/dev/null 2>&1; then
+if ! has_gtk "$RUBY"; then
+  if [ "$IS_MAC" = 1 ]; then
+    fail "This Ruby can't load GTK3 ($RUBY).
+Use the Ruby you run Lich with (usually Homebrew's): run again with  --ruby /path/to/ruby
+If Lich itself runs, find its Ruby by running in Terminal:  which ruby
+To add GTK3 to a Homebrew Ruby:  brew install gtk+3  then
+  $("$RUBY" -e 'print File.join(RbConfig::CONFIG["bindir"], "gem")') install gtk3"
+  fi
   fail "This Ruby can't load GTK3 ($RUBY).
 Lich's own windows need it too, so install it the way Lich's Linux instructions say,
 usually:   $("$RUBY" -e 'print File.join(RbConfig::CONFIG["bindir"], "gem")') install gtk3
@@ -85,11 +109,13 @@ fi
 say " OK."
 
 # ---- things schedules need (warnings only; manual logins work without them) ----
-if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+if [ "$IS_MAC" = 1 ]; then
+  : # Mac: schedules use launchd and alerts use the Mac's own, both built in
+elif ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
   say " WARNING: systemd user services aren't available here, so schedules won't work."
   say "          Logging in and out from the window still works."
 fi
-if ! command -v notify-send >/dev/null 2>&1 && ! command -v zenity >/dev/null 2>&1; then
+if [ "$IS_MAC" = 0 ] && ! command -v notify-send >/dev/null 2>&1 && ! command -v zenity >/dev/null 2>&1; then
   say " WARNING: notify-send isn't installed, so a failed scheduled login can't pop up a"
   say "          notification. Install it with:  sudo apt install libnotify-bin"
 fi
@@ -125,6 +151,42 @@ exec "$RUBY" "$APP/chrono.rb" "\$@"
 EOF
 chmod 755 "$BIN/chrono"
 
+if [ "$IS_MAC" = 1 ]; then
+# ---- Mac: Chrono.app in your Applications folder (a small app that starts Chrono) ----
+rm -rf "$MAC_APP"
+mkdir -p "$MAC_APP/Contents/MacOS" "$MAC_APP/Contents/Resources"
+cat > "$MAC_APP/Contents/MacOS/Chrono" <<EOF
+#!/bin/sh
+# Made by the Chrono installer. Starts Chrono with the Ruby that runs Lich.
+export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
+cd "$APP" && exec "$RUBY" "$APP/chrono_gui.rbw"
+EOF
+chmod 755 "$MAC_APP/Contents/MacOS/Chrono"
+cat > "$MAC_APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Chrono</string>
+  <key>CFBundleDisplayName</key><string>Chrono</string>
+  <key>CFBundleIdentifier</key><string>net.chrono4lich.chrono</string>
+  <key>CFBundleExecutable</key><string>Chrono</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>chrono</string>
+  <key>CFBundleShortVersionString</key><string>$("$RUBY" -e 'print File.read(ARGV[0])[/^CHRONO_VERSION = .([0-9.]+)/, 1].to_s' "$APP/chrono.rb")</string>
+</dict>
+</plist>
+EOF
+# the pocket watch icon, made from chrono.png with the Mac's own tools
+if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+  set_dir="$(mktemp -d)/chrono.iconset"; mkdir -p "$set_dir"
+  for sz in 16 32 128 256 512; do
+    sips -z $sz $sz "$APP/chrono.png" --out "$set_dir/icon_${sz}x${sz}.png" >/dev/null 2>&1 || true
+    sips -z $((sz*2)) $((sz*2)) "$APP/chrono.png" --out "$set_dir/icon_${sz}x${sz}@2x.png" >/dev/null 2>&1 || true
+  done
+  iconutil -c icns "$set_dir" -o "$MAC_APP/Contents/Resources/chrono.icns" >/dev/null 2>&1 || true
+fi
+else
 # ---- menu entry (named chrono.desktop so the dock matches it to the window) ----
 cat > "$DESKTOP_DIR/chrono.desktop" <<EOF
 [Desktop Entry]
@@ -142,6 +204,8 @@ EOF
 chmod 644 "$DESKTOP_DIR/chrono.desktop"
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
+fi
+
 # ---- point schedules at the new files and Ruby (this also carries over lichsched's) ----
 rc=0
 "$RUBY" "$APP/chrono.rb" rebuild-tasks >"$APP/.rebuild-output" 2>&1 || rc=$?
@@ -157,7 +221,8 @@ rm -f "$APP/.rebuild-output"
 
 say ""
 say " Done."
-say "  - \"Chrono\" is in your applications menu."
+if [ "$IS_MAC" = 1 ]; then say "  - \"Chrono\" is in your Applications folder ($MAC_APP)."
+else say "  - \"Chrono\" is in your applications menu."; fi
 case ":$PATH:" in
   *":$BIN:"*) say "  - The \"chrono\" command works in a terminal." ;;
   *) say "  - The command-line version is $BIN/chrono ($BIN isn't on your PATH yet)." ;;
@@ -165,8 +230,10 @@ esac
 say "  - The first time it opens, it finds your Lich folder or asks you for it."
 say "  - To uninstall, run: $APP/uninstall.sh"
 say ""
-if [ "$ASSUME_YES" = 0 ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+if [ "$ASSUME_YES" = 0 ] && { [ "$IS_MAC" = 1 ] || [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
   if ask " Open Chrono now?"; then
-    (cd "$APP" && nohup "$RUBY" "$APP/chrono_gui.rbw" >/dev/null 2>&1 &)
+    if [ "$IS_MAC" = 1 ]; then open "$MAC_APP"
+    else (cd "$APP" && nohup "$RUBY" "$APP/chrono_gui.rbw" >/dev/null 2>&1 &)
+    fi
   fi
 fi

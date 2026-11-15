@@ -21,7 +21,7 @@ require 'fileutils'
 require 'rbconfig'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.8.7'
+CHRONO_VERSION = '1.9.0'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -74,6 +74,7 @@ end
 
 # Pop-up for scheduled runs, so a failure at 6 AM isn't silent.
 def notify_box(title, text)
+  return notify_mac(title, text) if ChronoConfig.mac?
   return notify_linux(title, text) unless Gem.win_platform?
   require 'fiddle'
   box = Fiddle::Function.new(Fiddle.dlopen('user32')['MessageBoxW'],
@@ -82,6 +83,16 @@ def notify_box(title, text)
   wtext  = "#{text}\0".encode('UTF-16LE')
   wtitle = "#{title}\0".encode('UTF-16LE')
   box.call(Fiddle::NULL, wtext, wtitle, 0x10 | 0x10000 | 0x40000) # error icon, foreground, topmost
+end
+
+# Mac: an alert that stays until dismissed (title and text passed as arguments, not code).
+def notify_mac(title, text)
+  pid = Process.spawn('osascript', '-e', 'on run argv', '-e',
+                      'display alert (item 1 of argv) message (item 2 of argv) as critical', '-e', 'end run',
+                      title, text, in: File::NULL, out: File::NULL, err: File::NULL)
+  Process.detach(pid)
+rescue SystemCallError => e
+  log "Could not show an alert: #{e.message}", $stderr
 end
 
 # Linux: a desktop notification that stays until dismissed; zenity as a fallback.
@@ -203,6 +214,7 @@ end if Gem.win_platform?
 def pid_alive?(pid)
   return false unless pid.is_a?(Integer) && pid > 0
   return WinProc.ruby_running?(pid) if defined?(WinProc)
+  return mac_ruby_running?(pid) if ChronoConfig.mac?
   return linux_ruby_running?(pid) unless Gem.win_platform?
   out = `tasklist /FI "PID eq #{pid}" /NH /FO CSV 2>NUL`
   out.lines.any? do |l|
@@ -218,6 +230,17 @@ def linux_ruby_running?(pid)
   args = File.binread("/proc/#{pid}/cmdline").split("\0")
   args.first(2).any? { |a| File.basename(a).match?(/\Aruby/) } || args.any? { |a| a.end_with?('lich.rbw') }
 rescue Errno::ENOENT, Errno::ESRCH
+  false
+end
+
+# Mac (no /proc): the process exists, isn't a zombie, and is Ruby or Lich.
+def mac_ruby_running?(pid)
+  out = IO.popen(['ps', '-p', pid.to_s, '-o', 'stat=', '-o', 'command='], err: File::NULL, &:read).to_s.strip
+  return false if out.empty? || out.start_with?('Z')
+  stat, program, *args = out.split
+  return false unless stat && program
+  File.basename(program).start_with?('ruby') || args.any? { |a| a.end_with?('lich.rbw') }
+rescue SystemCallError
   false
 end
 
@@ -861,12 +884,28 @@ end
 
 QUICK_STAY = (ENV['CHRONO_QUICK_STAY'] || 45).to_i # seconds a quick (no logout time) scheduled login stays in once the game confirms it
 
-def cmd_run_schedule(kind, name)
+# launchd (Mac) runs a missed timed job as soon as the Mac wakes. Right for rewards, wrong for
+# a login: so a scheduled login or logout more than LATE_LIMIT minutes after its time is skipped.
+LATE_LIMIT = 10
+
+def too_late?(scheduled_for)
+  return false unless scheduled_for.to_s.match?(/\A\d{1,2}:\d{2}\z/)
+
+  h, m = scheduled_for.split(':').map(&:to_i)
+  now = Time.now
+  ((now.hour * 60 + now.min) - (h * 60 + m)) % 1440 > LATE_LIMIT
+end
+
+def cmd_run_schedule(kind, name, scheduled_for: nil)
   fail! 'Use: run-schedule login|logout "Schedule name"' unless %w[login logout].include?(kind) && name
+  if too_late?(scheduled_for)
+    log "SCHEDULE #{name}: the #{kind} was due at #{scheduled_for} (the computer was probably asleep); skipped"
+    return true
+  end
   s = Schedules.find(name)
   log "SCHEDULE #{s['name']}: scheduled #{kind} starting"
   if kind == 'login'
-    if !Gem.win_platform? && ENV['DISPLAY'].to_s.empty? && ENV['WAYLAND_DISPLAY'].to_s.empty?
+    if !Gem.win_platform? && !ChronoConfig.mac? && ENV['DISPLAY'].to_s.empty? && ENV['WAYLAND_DISPLAY'].to_s.empty?
       fail! 'The scheduled login has no desktop to open the game on (DISPLAY and WAYLAND_DISPLAY are not set). ' \
             'Make sure you are logged in to your desktop, then open Chrono and click ' \
             '"Rebuild scheduled tasks" on the Settings tab.'
@@ -981,7 +1020,8 @@ parser = OptionParser.new do |o|
   end
   o.on('--timeout SECONDS', Integer, 'How long to wait per character (login 120, logout 90)') { |v| opts[:timeout] = v }
   o.on('--gap SECONDS', Integer, 'Seconds between starting each login (default 2); they log in at the same time') { |v| opts[:gap] = v }
-  o.on('--notify', 'Show a Windows pop-up if anything fails (used by scheduled tasks)') { opts[:notify] = true }
+  o.on('--notify', 'Show a pop-up if anything fails (used by scheduled tasks)') { opts[:notify] = true }
+  o.on('--scheduled-for HH:MM', 'run-schedule: skip if run more than 10 minutes after this time (Mac)') { |v| opts[:scheduled_for] = v }
   o.on('--frontend NAME', 'Frontend for add-login (default: the one your saved logins use most)') { |v| opts[:frontend] = v.downcase }
 end
 
@@ -1052,7 +1092,7 @@ begin
       fail! 'kill takes exactly one name.' unless names.size == 1
       cmd_kill(names.first)
     when 'run-schedule'
-      cmd_run_schedule(names[0], names[1])
+      cmd_run_schedule(names[0], names[1], scheduled_for: opts[:scheduled_for])
     else
       puts parser
       exit 2

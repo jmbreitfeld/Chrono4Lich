@@ -131,8 +131,13 @@ module Autostart
     end
   end
 
+  # Mac: a launchd agent that opens Chrono when you sign in.
+  def mac_file = File.join(Dir.home, 'Library', 'LaunchAgents', 'net.chrono4lich.autostart.plist')
+
   def on?
-    if ChronoConfig.windows?
+    if ChronoConfig.mac?
+      File.exist?(mac_file)
+    elsif ChronoConfig.windows?
       system('reg', 'query', RUN_KEY, '/v', NAME, out: File::NULL, err: File::NULL) ? true : false
     else
       File.exist?(linux_file)
@@ -140,7 +145,17 @@ module Autostart
   end
 
   def enable!
-    if ChronoConfig.windows?
+    if ChronoConfig.mac?
+      FileUtils.mkdir_p(File.dirname(mac_file))
+      File.write(mac_file, Schedules.plist_xml(
+        'Label' => 'net.chrono4lich.autostart',
+        'ProgramArguments' => [RbConfig.ruby, gui_script, '--minimized'],
+        'WorkingDirectory' => ChronoConfig::APP_DIR,
+        'EnvironmentVariables' => { 'PATH' => Schedules::MAC_PATH },
+        'RunAtLoad' => true,
+        'LimitLoadToSessionType' => 'Aqua'
+      ))
+    elsif ChronoConfig.windows?
       ok = system('reg', 'add', RUN_KEY, '/v', NAME, '/t', 'REG_SZ', '/d', command, '/f', out: File::NULL, err: File::NULL)
       fail! "Windows didn't accept the startup setting (reg add failed)." unless ok
     else
@@ -161,7 +176,9 @@ module Autostart
   end
 
   def disable!
-    if ChronoConfig.windows?
+    if ChronoConfig.mac?
+      FileUtils.rm_f(mac_file)
+    elsif ChronoConfig.windows?
       system('reg', 'delete', RUN_KEY, '/v', NAME, '/f', out: File::NULL, err: File::NULL)
     else
       FileUtils.rm_f(linux_file)
@@ -1017,7 +1034,10 @@ class ChronoWindow
   end
 
   def open_url(url)
-    cmd = Gem.win_platform? ? ['rundll32', 'url.dll,FileProtocolHandler', url] : ['xdg-open', url]
+    cmd = if Gem.win_platform? then ['rundll32', 'url.dll,FileProtocolHandler', url]
+          elsif ChronoConfig.mac? then ['open', url]
+          else ['xdg-open', url]
+          end
     Process.detach(Process.spawn(*cmd, in: File::NULL, out: File::NULL, err: File::NULL))
   rescue SystemCallError => e
     error_dialog("Couldn't open the browser (#{e.message}). Open this address yourself:\n\n#{url}")
@@ -1772,7 +1792,7 @@ class ChronoWindow
 
   def open_folder(dir)
     FileUtils.mkdir_p(dir)
-    opener = ChronoConfig.windows? ? 'explorer.exe' : 'xdg-open'
+    opener = ChronoConfig.windows? ? 'explorer.exe' : (ChronoConfig.mac? ? 'open' : 'xdg-open')
     Process.detach(Process.spawn(opener, ChronoConfig.disp(dir), in: File::NULL, out: File::NULL, err: File::NULL))
   end
 

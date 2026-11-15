@@ -1,6 +1,6 @@
 # Chrono (Chrono4Lich)
 
-Log GemStone IV characters in and out through [Lich5](https://github.com/elanthia-online/lich-5), by hand or on a schedule, on Windows and Linux.
+Log GemStone IV characters in and out through [Lich5](https://github.com/elanthia-online/lich-5), by hand or on a schedule, on Windows, Linux and Mac.
 
 - **Characters:** tick as many characters as you like and log them in or out together.
 - **Schedules:** log characters in and out at set times on chosen days, even with the Chrono window closed.
@@ -13,6 +13,7 @@ Get the latest version from the [Releases](../../releases/latest) page:
 
 - **Windows:** `Chrono4Lich-setup-VERSION.exe`. Run it; no admin rights needed.
 - **Linux:** `Chrono4Lich-linux.tar.gz`. Unpack it and run `./install.sh`.
+- **Mac:** `Chrono4Lich-mac.tar.gz`. Unpack it and run `bash install.sh` in Terminal.
 
 You need Lich5 already installed and working, with its own Ruby. Full instructions are in [README.txt](README.txt), which is also included in every download.
 

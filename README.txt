@@ -5,7 +5,7 @@ Chrono used to be called lichsched. Installing Chrono replaces lichsched and kee
 schedules and saved Lich folder.
 
 WHAT YOU NEED
-  - Windows 10 or 11, or desktop Linux with systemd (see LINUX below)
+  - Windows 10 or 11, desktop Linux with systemd (see LINUX below), or a Mac (see MAC below)
   - Lich5 installed with its own Ruby (on Windows, the Ruby4Lich5 installer; includes GTK)
   - Your Simutronics account(s). Saved logins can be added on Chrono's Logins tab, or in
     Lich's login window as before; both use the same saved logins.
@@ -41,6 +41,26 @@ INSTALL ON LINUX (tested target: Pop!_OS with COSMIC; other systemd desktops sho
 
   Chrono copies its small in-game helper (chrono_helper.lic) into Lich's scripts
   folder by itself. You never need to run it by hand.
+
+INSTALL ON MAC
+  Any Mac that runs Lich works (Chrono uses the same Ruby and GTK as Lich, usually from
+  Homebrew). Get Lich working first.
+  1. Download Chrono4Lich-mac.tar.gz and double-click it in Finder to unpack it.
+  2. Open Terminal, type  cd  and a space, drag the Chrono4Lich folder onto the Terminal
+     window, press Return, then run:
+       bash install.sh
+     It finds the Ruby you run Lich with (one that has GTK3, usually Homebrew's; Apple's own
+     old Ruby can't run Lich), installs for your user only (no admin password) into
+     ~/.local/share/Chrono4Lich, and adds Chrono to your Applications folder plus a "chrono"
+     command. If it picks the wrong Ruby:  bash install.sh --ruby /path/to/ruby
+  3. Open Chrono from your Applications folder. It finds your Lich folder (Desktop/Lich5 and
+     other usual places) or asks you for it.
+  Schedules and the daily reward run use launchd, the Mac's built-in scheduler
+  (~/Library/LaunchAgents/net.chrono4lich.*). Your Mac must be awake and you signed in at
+  the scheduled time. A reward run missed while the Mac slept happens when it wakes; a
+  scheduled login or logout more than 10 minutes late is skipped instead (so a 6 PM login
+  doesn't happen at 9 AM). Failures show a Mac alert. Updates: "Update now" works the same.
+  Uninstall: run ~/.local/share/Chrono4Lich/uninstall.sh
 
 USING IT
   Characters tab: tick characters, then Log in selected / Log out selected /

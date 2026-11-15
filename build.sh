@@ -3,6 +3,7 @@
 #   Chrono4Lich-setup-VERSION.exe  Windows installer (needs makensis: apt install nsis)
 #   Chrono4Lich.zip                Windows, without the installer
 #   Chrono4Lich-linux.tar.gz       Linux
+#   Chrono4Lich-mac.tar.gz         Mac (same files as Linux)
 #   ./build.sh 1.6.1
 set -euo pipefail
 VERSION="${1:?usage: ./build.sh VERSION}"
@@ -24,6 +25,8 @@ sed 's/\r$//; s/$/\r/' README.txt > build/win/Chrono4Lich/README.txt
 cp "${FILES[@]}" README.txt install.sh uninstall.sh build/linux/Chrono4Lich/
 chmod 755 build/linux/Chrono4Lich/*.sh
 (cd build/linux && tar czf ../../dist/Chrono4Lich-linux.tar.gz Chrono4Lich)
+# Mac: the same files and install.sh (it detects the Mac), under a name Mac players will look for
+cp dist/Chrono4Lich-linux.tar.gz dist/Chrono4Lich-mac.tar.gz
 
 # Windows installer
 makensis -V2 -DVERSION="$VERSION" Chrono4Lich.nsi
