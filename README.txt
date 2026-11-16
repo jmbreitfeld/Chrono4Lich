@@ -117,8 +117,8 @@ USING IT
     dr-platinum, dr-fallen, dr-test) and log in and out, by hand or on a schedule, like
     GemStone ones. Chrono uses the same Lich folder for both games unless you keep a
     separate Lich for DragonRealms (e.g. Lich5-DR): then pick it on the Settings tab with
-    "Change DragonRealms folder...". SimuCoins are claimed for DragonRealms accounts too;
-    daily login rewards are GemStone only.
+    "Change DragonRealms folder...". Rewards work for DragonRealms accounts too (SimuCoins,
+    and daily login rewards for DragonRealms Prime and Platinum characters).
   Settings tab: colors (Match my computer, Light or Dark) and text size (Normal to Huge),
     which apply right away; change the Lich folder (and the DragonRealms one), open the
     log folder, rebuild the scheduled tasks, check for updates, and "Open Chrono
@@ -165,13 +165,15 @@ REWARDS
   - Tick "Claim rewards automatically every day at", pick a time, click Save. Chrono
     picks a random evening time to start with, so not everyone hits Simutronics'
     servers at once; change it if you like.
-  - SimuCoins (on for every account unless you untick it): your subscription bonus is
-    offered once a month. Chrono checks the store every day and presses Claim when it's
-    offered. "Next Subscription Bonus..." just means it isn't due yet. If the computer
-    was off at the scheduled time, the run happens as soon as it's back on.
+  - SimuCoins (on for every account unless you untick it): a paying account's
+    subscription bonus (GemStone or DragonRealms) is offered once a month. Chrono checks
+    the store every day and presses Claim when it's offered. "Next Subscription Bonus..."
+    just means it isn't due yet. If the computer was off at the scheduled time, the run
+    happens as soon as it's back on.
   - Daily login rewards (off unless you tick it, per account): Chrono briefly logs in
-    each GemStone Prime character on the account, collects the reward, and quits. (No box
-    for an account with no GemStone characters.) Don't turn this
+    each GemStone Prime, DragonRealms Prime and DragonRealms Platinum character on the
+    account, collects the reward, and quits. (No box for an account with none of those
+    characters.) Don't turn this
     on for an account you might be playing at that time: a character online somewhere
     Chrono didn't start would be disconnected. If a character Chrono started is online,
     that account's daily logins are skipped that day.

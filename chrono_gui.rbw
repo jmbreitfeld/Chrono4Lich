@@ -696,7 +696,7 @@ class ChronoWindow
     @rewards_info.wrap = true
     page.pack_start(@rewards_info, expand: false, fill: false)
 
-    # account, simucoins, daily, last result, claim on GitHub, has GemStone characters
+    # account, simucoins, daily, last result, claim on GitHub, has characters that get daily rewards
     @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass, TrueClass)
     @rewards_view = Gtk::TreeView.new(@rewards_store)
     @rewards_view.append_column(Gtk::TreeViewColumn.new('Account', Gtk::CellRendererText.new, text: 0))
@@ -712,7 +712,7 @@ class ChronoWindow
         end
       end
       column = Gtk::TreeViewColumn.new(title, toggle, active: col)
-      if key == :daily # GemStone only: no box for an account with no GemStone characters
+      if key == :daily # no box for an account with no characters that get daily rewards
         column.set_cell_data_func(toggle) { |_c, r, _m, it| r.activatable = r.visible = it[5] }
       end
       @rewards_view.append_column(column)
@@ -827,7 +827,7 @@ class ChronoWindow
       it[2] = a[:daily]
       it[3] = a[:where] == 'github' ? 'claimed on GitHub (see "Open results on GitHub")' : Rewards.summary(a[:last])
       it[4] = a[:where] == 'github'
-      it[5] = a[:gemstone]
+      it[5] = a[:daily_ok]
       @rewards_view.selection.select_iter(it) if a[:name] == selected
     end
     reload_github_status(data)
