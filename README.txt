@@ -1,5 +1,5 @@
-Chrono (Chrono4Lich) - log GemStone IV characters in and out through Lich5, by hand or on a schedule
-=====================================================================================================
+Chrono (Chrono4Lich) - log GemStone IV and DragonRealms characters in and out through Lich5, by hand or on a schedule
+======================================================================================================================
 
 Chrono used to be called lichsched. Installing Chrono replaces lichsched and keeps your
 schedules and saved Lich folder.
@@ -98,9 +98,24 @@ USING IT
     the taskbar) and -x 0 -y 0. When Chrono logs the character in (by hand or on a
     schedule), it then maximizes Warlock's window ("Warlock - Name") once the character is
     in, so it fills the screen exactly. Logging in from Lich's own window only gets the size.
-  Settings tab: change the Lich folder, open the log folder, rebuild the
-    scheduled tasks, check for updates, and "Open Chrono (minimized) when I sign in"
-    (on Windows this adds Chrono to your startup apps; uninstalling removes it).
+    Saga: pick "saga" as the frontend. Saga logs characters in itself: Lich hands the login
+    to Saga, which signs in with the login saved in Saga (so the account must be saved
+    there too) and starts its own Lich for the character. Chrono can see that character
+    come online, and log it out (by hand or on a schedule), only if Chrono's helper runs
+    in Saga's Lich: type  ;autostart add --global chrono_helper  once in any GemStone game
+    window, and once in a DragonRealms one if you play it there too (each Lich folder keeps
+    its own list). Without it, Chrono starts the login, says it can't follow it, and you
+    log out in Saga. (Saga must use the same Lich folders as Chrono for each game.)
+  DragonRealms: characters saved for DragonRealms are listed with the realm dr (or
+    dr-platinum, dr-fallen, dr-test) and log in and out, by hand or on a schedule, like
+    GemStone ones. Chrono uses the same Lich folder for both games unless you keep a
+    separate Lich for DragonRealms (e.g. Lich5-DR): then pick it on the Settings tab with
+    "Change DragonRealms folder...". Daily rewards are GemStone only.
+  Settings tab: colors (Match my computer, Light or Dark) and text size (Normal to Huge),
+    which apply right away; change the Lich folder (and the DragonRealms one), open the
+    log folder, rebuild the scheduled tasks, check for updates, and "Open Chrono
+    (minimized) when I sign in" (on Windows this adds Chrono to your startup apps;
+    uninstalling removes it).
   Chrono remembers which characters you ticked, your start scripts, and the window's size
   (and whether it was maximized) for next time.
   "About Chrono" (bottom right) shows the version and what Chrono does.
@@ -121,7 +136,7 @@ UPDATES
   chrono check-update
 
   Realms: Prime, Shattered and Test. (Platinum is retired; old Platinum logins still
-  show up but can't be added.)
+  show up but can't be added.) DragonRealms: dr (Prime), dr-platinum, dr-fallen, dr-test.
 
 SCHEDULES - GOOD TO KNOW
   - On Windows they are scheduled tasks (Task Scheduler, folder "Chrono4Lich");
@@ -219,6 +234,7 @@ COMMAND LINE (optional)
     chrono status
     chrono logout all
     chrono config
+    chrono set-dr-lich-dir FOLDER   (a separate Lich for DragonRealms; "same" undoes it)
     chrono add-login ACCOUNT        (asks for the password, then which characters)
     chrono change-password ACCOUNT
     chrono remove-login Name
@@ -230,7 +246,7 @@ COMMAND LINE (optional)
     chrono github-stop
     chrono exact-setup              (cron-job.org starts the GitHub run on time)
     chrono exact-stop
-  A name can include its realm, e.g. Name:shattered.
+  A name can include its realm, e.g. Name:shattered, or Name:dr for a DragonRealms character.
 
 UPDATING, MOVING OR A NEW RUBY
   Windows setup.exe or Linux install.sh: just run the new one. Your Lich folder and

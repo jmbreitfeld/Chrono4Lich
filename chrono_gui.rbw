@@ -1,4 +1,4 @@
-# chrono_gui.rbw - window for logging GemStone IV characters in and out through Lich5
+# chrono_gui.rbw - window for logging GemStone IV and DragonRealms characters in and out through Lich5
 #
 # Keep this file next to chrono.rb. The installer (setup.exe or install.bat on Windows,
 # install.sh on Linux) makes the shortcut that starts it.
@@ -22,8 +22,8 @@ module LichFolderPicker
     r
   end
 
-  def browse(parent = nil)
-    d = Gtk::FileChooserDialog.new(title: 'Pick your Lich folder (the one with lich.rbw in it)',
+  def browse(parent = nil, title: 'Pick your Lich folder (the one with lich.rbw in it)')
+    d = Gtk::FileChooserDialog.new(title: title,
                                    parent: parent, action: :select_folder,
                                    buttons: [['Cancel', Gtk::ResponseType::CANCEL], ['Select', Gtk::ResponseType::ACCEPT]])
     dir = d.run == Gtk::ResponseType::ACCEPT ? d.filename : nil
@@ -229,6 +229,69 @@ module GuiPrefs
   end
 end
 
+# Light or dark, and how big the text is (Settings tab), kept in gui_settings.json.
+# Dark uses the theme's own dark version (GTK's "prefer dark"); "Match my computer" follows
+# the Mac's, Windows' or GNOME's light/dark setting, and is checked again every 30 seconds.
+# Text size scales the font GTK uses everywhere, from the size the system gave it.
+module Appearance
+  THEMES = [['auto', 'Match my computer'], ['light', 'Light'], ['dark', 'Dark']].freeze
+  SIZES  = [[100, 'Normal'], [125, 'Large'], [150, 'Larger'], [175, 'Largest'], [200, 'Huge']].freeze
+
+  module_function
+
+  def theme
+    t = GuiPrefs.get('theme', 'auto').to_s
+    THEMES.any? { |id, _| id == t } ? t : 'auto'
+  end
+
+  def text_scale = GuiPrefs.get('text_scale', 100).to_i.clamp(50, 300)
+
+  # The computer's own light/dark setting, where Chrono can tell (otherwise light).
+  def system_dark?
+    if ChronoConfig.mac?
+      IO.popen(%w[defaults read -g AppleInterfaceStyle], err: File::NULL, &:read).to_s.strip.casecmp?('dark')
+    elsif ChronoConfig.windows?
+      require 'win32/registry' # read directly: running reg.exe would flash a console window
+      Win32::Registry::HKEY_CURRENT_USER.open('Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') do |r|
+        r['AppsUseLightTheme'].to_i.zero?
+      end
+    else
+      IO.popen(%w[gsettings get org.gnome.desktop.interface color-scheme], err: File::NULL, &:read).to_s.include?('dark')
+    end
+  rescue StandardError, LoadError
+    false
+  end
+
+  def dark? = theme == 'dark' || (theme == 'auto' && system_dark?)
+
+  def css
+    @css ||= Gtk::CssProvider.new.tap do |p|
+      Gtk::StyleContext.add_provider_for_screen(Gdk::Screen.default, p, Gtk::StyleProvider::PRIORITY_APPLICATION)
+    end
+  end
+
+  # Applies both settings. Returns true if anything changed (so the caller can redraw).
+  def apply!
+    s = Gtk::Settings.default
+    @base_font ||= s.gtk_font_name.to_s
+    desc = Pango::FontDescription.new(@base_font)
+    base = desc.size.to_f / Pango::SCALE
+    base = 12.0 if base <= 0
+    desc.size = (base * text_scale / 100.0 * Pango::SCALE).round
+    want_dark = dark?
+    changed = s.gtk_application_prefer_dark_theme? != want_dark || s.gtk_font_name != desc.to_s
+    s.gtk_application_prefer_dark_theme = want_dark
+    s.gtk_font_name = desc.to_s
+    # tick boxes and round buttons don't follow the font, so grow them with it (themes draw them 14-16px)
+    box = (14 * text_scale / 100.0).round
+    css.load(data: "check, radio { min-width: #{box}px; min-height: #{box}px; }")
+    changed
+  rescue StandardError => e
+    gui_log("couldn't apply the appearance settings: #{e.class}: #{e.message}")
+    false
+  end
+end
+
 class ChronoWindow
   COL_CHECK   = 0
   COL_NAME    = 1
@@ -249,14 +312,28 @@ class ChronoWindow
     @busy = false
     @job_errors = []
     build_window
+    append_log("!!! DragonRealms characters are hidden: #{DR_LICH_DIR_PROBLEM}") if DR_LICH_DIR_PROBLEM
+    install_helpers
     safely { reload_characters }
     safely { refresh_status }
     GLib::Timeout.add(200) { safely { pump_queue }; true }
     GLib::Timeout.add_seconds(3) { safely { refresh_status unless @busy_refreshing }; true }
+    # "Match my computer": notice when the computer switches between light and dark
+    GLib::Timeout.add_seconds(30) { safely { refresh_appearance if Appearance.theme == 'auto' }; true }
     @win.show_all
     @win.iconify if ARGV.include?('--minimized') # opened at sign-in
     Autostart.refresh!
     check_for_update(quiet: true) if GuiPrefs.get('check_updates', true)
+  end
+
+  # Puts the current helper in each Lich folder's scripts folder, so it's there for Lich's
+  # autostart (Saga logins) even before Chrono logs anyone in from that folder.
+  def install_helpers
+    lich_folders.each do |dir|
+      ensure_helper!(dir)
+    rescue Fail, SystemCallError => e
+      gui_log("couldn't install #{HELPER}.lic into #{dir}: #{e.message}")
+    end
   end
 
   # ---------- updates and about ----------
@@ -368,7 +445,7 @@ class ChronoWindow
     d.modal = true
     d.program_name = 'Chrono'
     d.version = CHRONO_VERSION
-    d.comments = "Logs GemStone IV characters in and out through Lich5, by hand or on a schedule.\n" \
+    d.comments = "Logs GemStone IV and DragonRealms characters in and out through Lich5, by hand or on a schedule.\n" \
                  "Adds and manages Lich's saved logins (any frontend, plus Warlock).\n" \
                  'Claims monthly SimuCoins and, if you like, daily login rewards, on this computer or on GitHub.'
     d.website = ChronoGitHub::PROJECT_URL
@@ -411,11 +488,11 @@ class ChronoWindow
     root.pack_start(build_update_bar, expand: false, fill: false)
 
     notebook = Gtk::Notebook.new
-    notebook.append_page(build_characters_page, Gtk::Label.new('Characters'))
-    notebook.append_page(build_schedules_page, Gtk::Label.new('Schedules'))
-    notebook.append_page(build_rewards_page, Gtk::Label.new('Rewards'))
-    notebook.append_page(build_logins_page, Gtk::Label.new('Logins'))
-    notebook.append_page(build_settings_page, Gtk::Label.new('Settings'))
+    notebook.append_page(scrollable(build_characters_page), Gtk::Label.new('Characters'))
+    notebook.append_page(scrollable(build_schedules_page), Gtk::Label.new('Schedules'))
+    notebook.append_page(scrollable(build_rewards_page), Gtk::Label.new('Rewards'))
+    notebook.append_page(scrollable(build_logins_page), Gtk::Label.new('Logins'))
+    notebook.append_page(scrollable(build_settings_page), Gtk::Label.new('Settings'))
     root.pack_start(notebook, expand: true, fill: true)
 
     # output, shared by both tabs
@@ -461,14 +538,14 @@ class ChronoWindow
     # A "Log in" / "Log out" button on each row: one character, whatever is ticked. A list
     # can't hold real buttons, so it shows a picture of one, drawn by a real (off-screen) button
     # in the current theme; clicks on it are handled below.
-    pics = row_button_images(['Log in', 'Log out'])
-    images = { login: pics['Log in'], logout: pics['Log out'] }
+    # (redrawn by refresh_appearance when the theme or text size changes)
+    @row_images = row_images
     cell = Gtk::CellRendererPixbuf.new
     cell.xpad = 4
     cell.xalign = 0
     @action_col = Gtk::TreeViewColumn.new('', cell)
     @action_col.set_cell_data_func(cell) do |_col, c, _model, iter|
-      img = images[row_action(iter)]
+      img = @row_images[row_action(iter)]
       c.visible = !img.nil?
       c.pixbuf = img if img
     end
@@ -629,6 +706,8 @@ class ChronoWindow
     scroll = Gtk::ScrolledWindow.new
     scroll.set_policy(:automatic, :automatic)
     scroll.add(@rewards_view)
+    # ask for room for every account (there are only a few), so large text doesn't squeeze it
+    scroll.propagate_natural_height = true if scroll.respond_to?(:propagate_natural_height=)
     page.pack_start(scroll, expand: true, fill: true)
 
     row2 = Gtk::Box.new(:horizontal, 6)
@@ -1266,8 +1345,8 @@ class ChronoWindow
     page
   end
 
-  def reload_logins
-    @logins_store.clear
+  # Which file a Lich folder keeps its saved logins in, e.g. "entry.yaml (passwords: plaintext), Lich 5.24.1".
+  def saved_logins_kind
     kind =
       if SavedLogins.backend == :yaml
         mode = (File.exist?(SavedLogins.yaml_file) && SavedLogins.load_yaml['encryption_mode']) || 'plaintext'
@@ -1276,8 +1355,18 @@ class ChronoWindow
         'entry.dat'
       end
     ver = SavedLogins.lich_version
-    @logins_info.text = "Saved logins are in #{kind}#{ver ? ", Lich #{ver}" : ''}."
-    return unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
+    "#{kind}#{ver ? ", Lich #{ver}" : ''}"
+  end
+
+  def reload_logins
+    @logins_store.clear
+    text = "Saved logins are in #{saved_logins_kind}."
+    if DR_LICH_DIR && DR_LICH_DIR != LICH_DIR
+      text = "GemStone logins are in #{saved_logins_kind}.\nDragonRealms logins are in " \
+             "#{SavedLogins.in_folder(DR_LICH_DIR) { saved_logins_kind }} in #{ChronoConfig.disp(DR_LICH_DIR)}."
+    end
+    @logins_info.text = text
+    return unless SavedLogins.any_saved?
 
     open = (@logins_open ||= {})
     if @warlock_max
@@ -1298,7 +1387,7 @@ class ChronoWindow
       a[4] = ''
       a[5] = ''
       a[6] = 700
-      list.sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s, e[:frontend].to_s] }.each do |e|
+      list.sort_by { |e| [*game_order(e), e[:frontend].to_s] }.each do |e|
         c = @logins_store.append(a)
         c[0] = e[:char_name].to_s
         c[1] = realm_of(e)
@@ -1460,7 +1549,7 @@ class ChronoWindow
                           it[3] = already ? 'already saved' : ''
                           it[4] = c[:game_code]
                         end
-                        status.text = chars.empty? ? 'This account has no GemStone characters in a game it\'s subscribed to.' :
+                        status.text = chars.empty? ? 'This account has no GemStone or DragonRealms characters in a game it\'s subscribed to.' :
                                                      'Password confirmed. Tick the characters to save.'
                         save.sensitive = !chars.empty?
                       },
@@ -1468,7 +1557,7 @@ class ChronoWindow
                         next if closed
                         lookup.sensitive = true
                         status.text = msg
-                      }) { ChronoEAccess.list_characters(acct, pw, data_dir: DATA_DIR) }
+                      }) { ChronoEAccess.list_characters(acct, pw, data_dir: DATA_DIR, codes: ChronoEAccess::ALL_CODES) }
       end
     end
     # changing the account or password means the list must be looked up again
@@ -1747,6 +1836,36 @@ class ChronoWindow
       page.pack_start(row, expand: false, fill: false)
     end
 
+    info.call('Appearance', 'Light or dark, and how big the text is. Changes apply right away.')
+    looks = Gtk::Box.new(:horizontal, 6)
+    looks.pack_start(Gtk::Label.new('Colors:'), expand: false, fill: false)
+    theme_box = Gtk::ComboBoxText.new
+    Appearance::THEMES.each { |id, label| theme_box.append(id, label) }
+    theme_box.active_id = Appearance.theme
+    theme_box.signal_connect('changed') do
+      safely do
+        GuiPrefs.set('theme', theme_box.active_id)
+        refresh_appearance
+        append_log("Colors: #{theme_box.active_text}.")
+      end
+    end
+    looks.pack_start(theme_box, expand: false, fill: false)
+    size_label = Gtk::Label.new('Text size:')
+    size_label.margin_start = 12
+    looks.pack_start(size_label, expand: false, fill: false)
+    size_box = Gtk::ComboBoxText.new
+    Appearance::SIZES.each { |pct, label| size_box.append(pct.to_s, "#{label} (#{pct}%)") }
+    size_box.active_id = Appearance.text_scale.to_s
+    size_box.signal_connect('changed') do
+      safely do
+        GuiPrefs.set('text_scale', size_box.active_id.to_i)
+        refresh_appearance
+        append_log("Text size: #{size_box.active_text}.")
+      end
+    end
+    looks.pack_start(size_box, expand: false, fill: false)
+    page.pack_start(looks, expand: false, fill: false)
+
     info.call('Lich folder', ChronoConfig.disp(LICH_DIR))
     lich_row = Gtk::Box.new(:horizontal, 6)
     change = button('Change Lich folder...') { change_lich_folder }
@@ -1754,6 +1873,26 @@ class ChronoWindow
     lich_row.pack_start(change, expand: false, fill: false)
     lich_row.pack_start(button('Open Lich folder') { open_folder(LICH_DIR) }, expand: false, fill: false)
     page.pack_start(lich_row, expand: false, fill: false)
+
+    # DragonRealms: the same Lich unless the person keeps a separate one for it
+    separate = DR_LICH_DIR && DR_LICH_DIR != LICH_DIR
+    dr_text =
+      if DR_LICH_DIR.nil? then "Not found. #{DR_LICH_DIR_PROBLEM}"
+      elsif separate then ChronoConfig.disp(DR_LICH_DIR)
+      else 'The same Lich folder as above. Change it only if you keep a separate Lich for DragonRealms.'
+      end
+    info.call('DragonRealms Lich folder', dr_text)
+    dr_row = Gtk::Box.new(:horizontal, 6)
+    dr_change = button('Change DragonRealms folder...') { change_dr_lich_folder }
+    @action_buttons << dr_change
+    dr_row.pack_start(dr_change, expand: false, fill: false)
+    if DR_LICH_DIR != LICH_DIR
+      same = button('Use the same Lich as GemStone') { change_dr_lich_folder(same: true) }
+      @action_buttons << same
+      dr_row.pack_start(same, expand: false, fill: false)
+    end
+    dr_row.pack_start(button('Open DragonRealms folder') { open_folder(DR_LICH_DIR) }, expand: false, fill: false) if separate
+    page.pack_start(dr_row, expand: false, fill: false)
 
     reinstall = ChronoConfig.windows? ? 'run the installer again' : 'run install.sh again'
     info.call('Ruby', "#{ChronoConfig.disp(rubyw_path)}\nThis is the Ruby that opened Chrono. To use a different one, #{reinstall}.")
@@ -1793,6 +1932,18 @@ class ChronoWindow
     page
   end
 
+  # A tab's page that scrolls when large text makes it taller than the window, so the
+  # window never has to grow past the screen. With room to spare the page fills it as before.
+  def scrollable(page)
+    scroll = Gtk::ScrolledWindow.new
+    scroll.set_policy(:never, :automatic)
+    scroll.shadow_type = :none
+    scroll.add(page)
+    # give the page the height it asks for (scrolling past it) rather than squeezing its lists
+    scroll.child.vscroll_policy = :natural if scroll.child.respond_to?(:vscroll_policy=)
+    scroll
+  end
+
   def open_folder(dir)
     FileUtils.mkdir_p(dir)
     opener = ChronoConfig.windows? ? 'explorer.exe' : (ChronoConfig.mac? ? 'open' : 'xdg-open')
@@ -1810,6 +1961,24 @@ class ChronoWindow
     end
     ChronoConfig.save('lich_dir' => dir)
     gui_log("Lich folder changed to #{dir}; restarting")
+    Process.detach(Process.spawn(rubyw_path, File.join(ChronoConfig::APP_DIR, 'chrono_gui.rbw')))
+    Gtk.main_quit
+  end
+
+  # Picks the Lich folder DragonRealms characters log in through (same: GemStone's), then
+  # restarts the window, since the folders are read when Chrono starts.
+  def change_dr_lich_folder(same: false)
+    dir = nil
+    unless same
+      dir = LichFolderPicker.browse(@win, title: 'Pick the Lich folder you use for DragonRealms (the one with lich.rbw in it)') or return
+      fail! ChronoConfig.why_invalid(dir) unless ChronoConfig.valid_lich_dir?(dir)
+      dir = ChronoConfig.normalize(dir)
+      dir = nil if dir.casecmp?(LICH_DIR)
+    end
+    return if (dir || LICH_DIR).casecmp?(DR_LICH_DIR.to_s)
+
+    ChronoConfig.save('dr_lich_dir' => dir)
+    gui_log("DragonRealms Lich folder changed to #{dir || 'the GemStone one'}; restarting")
     Process.detach(Process.spawn(rubyw_path, File.join(ChronoConfig::APP_DIR, 'chrono_gui.rbw')))
     Gtk.main_quit
   end
@@ -1834,7 +2003,8 @@ class ChronoWindow
       iter[1] = Schedules.describe_days(s['days'])
       iter[2] = s['login_at']
       iter[3] = s['logout_at'] || 'after ~1 min'
-      iter[4] = s['characters'].map { |c| c.split(':').first }.join(', ')
+      # DragonRealms characters are marked, since a name can be in both games
+      iter[4] = s['characters'].map { |c| n, r = c.split(':', 2); dr_realm?(r) ? "#{n} (#{r})" : n }.join(', ')
       iter[5] = s['enabled'] == false ? 'off' : 'yes'
     end
   end
@@ -1895,7 +2065,7 @@ class ChronoWindow
   def edit_schedule_dialog(existing)
     entries = load_entries
     chars = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
-                   .sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s] }
+                   .sort_by { |e| game_order(e) }
 
     d = Gtk::Dialog.new(title: existing ? "Edit schedule '#{existing['name']}'" : 'New schedule',
                         parent: @win, flags: %i[modal destroy_with_parent])
@@ -2048,13 +2218,13 @@ class ChronoWindow
     @characters_loaded = true
     @store.clear
     # No saved logins yet is normal for a new user, not an error: point them at the Logins tab.
-    unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
+    unless SavedLogins.any_saved?
       append_log('No saved logins yet. Add your accounts on the Logins tab to get started.')
       return
     end
     entries = load_entries
     shown = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
-    shown.sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s] }.each do |e|
+    shown.sort_by { |e| game_order(e) }.each do |e|
       spec = "#{e[:char_name]}:#{realm_of(e)}"
       iter = @store.append
       iter[COL_CHECK]   = checked.include?(spec)
@@ -2071,14 +2241,16 @@ class ChronoWindow
   def refresh_status
     @busy_refreshing = true
     @store.each do |_model, _path, iter|
-      iter[COL_STATUS] = status_text(iter[COL_NAME])
+      iter[COL_STATUS] = status_text(iter[COL_SPEC])
     end
   ensure
     @busy_refreshing = false
   end
 
-  def status_text(name)
-    st = read_status(name)
+  # spec is the row's "Name:realm"; its game says where the helper's status file is.
+  def status_text(spec)
+    name = spec.split(':', 2).first
+    st = read_status(who_from_spec(spec))
     return 'Offline' unless st
     return 'Offline' if st['state'] == 'offline'
     unless pid_alive?(st['pid'])
@@ -2147,6 +2319,20 @@ class ChronoWindow
 
   # Pictures of small real buttons with these labels, all the same width (a size group makes
   # each as wide as the widest), in the current theme.
+  def row_images
+    pics = row_button_images(['Log in', 'Log out'])
+    { login: pics['Log in'], logout: pics['Log out'] }
+  end
+
+  # Applies the light/dark and text size settings, and redraws what doesn't follow by itself.
+  def refresh_appearance
+    return unless Appearance.apply!
+
+    @row_images = row_images
+    @view&.columns_autosize
+    @view&.queue_draw
+  end
+
   def row_button_images(labels)
     css = Gtk::CssProvider.new
     css.load(data: 'button { min-height: 0; padding: 1px 10px; }')
@@ -2344,6 +2530,7 @@ begin
   setup_app_identity
   LichFolderPicker.ensure_configured
   require_relative 'chrono'
+  Appearance.apply! # light/dark and text size (Settings tab), before any window is built
   begin
     waiting = migrate_from_lichsched!
     unless waiting.empty?

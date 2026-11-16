@@ -57,11 +57,16 @@ module Rewards
     File.rename(tmp, FILE)
   end
 
+  # Rewards are GemStone ones, so DragonRealms logins are left out.
+  def gemstone_entries
+    (load_entries rescue []).reject { |e| dr_code?(e[:game_code]) }
+  end
+
   # Accounts from the saved logins, with their reward settings.
   # SimuCoins are claimed for every account unless turned off; daily login rewards are off
   # unless turned on.
   def accounts(data = load)
-    names = (load_entries rescue []).map { |e| e[:user_id].to_s.upcase }.uniq.sort
+    names = gemstone_entries.map { |e| e[:user_id].to_s.upcase }.uniq.sort
     names.map do |a|
       cfg = data['accounts'][a] || {}
       { name: a, coins: cfg.fetch('coins', true), daily: cfg.fetch('daily', false),
@@ -565,7 +570,7 @@ module Rewards
           end
         end
         if acct[:daily]
-          busy = (load_entries rescue []).select { |e| e[:user_id].to_s.casecmp?(name) && online?(e[:char_name].to_s) }
+          busy = gemstone_entries.select { |e| e[:user_id].to_s.casecmp?(name) && online?(who_of(e)) }
           if busy.any?
             msg = "skipped: #{busy.map { |e| e[:char_name] }.join(', ')} online (a login reward run would disconnect them)"
             result['logins'] = [['(account)', msg, true]]

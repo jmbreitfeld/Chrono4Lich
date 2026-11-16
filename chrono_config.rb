@@ -149,4 +149,18 @@ module ChronoConfig
     save('lich_dir' => found.first)
     found.first
   end
+
+  # The Lich folder used for DragonRealms. Many players run both games from one Lich, so it's
+  # the GemStone folder (gs_dir) unless a separate one is saved (some keep a Lich for each game).
+  # Raises if a saved folder is no longer a Lich folder, so that isn't silent.
+  def dr_lich_dir(gs_dir)
+    if ENV['CHRONO_DR_LICH_DIR'] && !ENV['CHRONO_DR_LICH_DIR'].empty?
+      return normalize(ENV['CHRONO_DR_LICH_DIR'])
+    end
+    saved = load['dr_lich_dir']
+    return gs_dir if saved.nil? || saved.to_s.strip.empty?
+    raise "The saved DragonRealms Lich folder isn't valid any more: #{why_invalid(saved)}" unless valid_lich_dir?(saved)
+
+    normalize(saved)
+  end
 end

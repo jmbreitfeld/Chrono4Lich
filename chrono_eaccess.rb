@@ -17,14 +17,16 @@ module ChronoEAccess
   CONNECT_TIMEOUT = 8
   READ_TIMEOUT    = 15
   GEMSTONE_CODES  = %w[GS3 GSF GST GSX].freeze
+  DRAGONREALMS_CODES = %w[DR DRF DRT DRX].freeze
+  ALL_CODES = (GEMSTONE_CODES + DRAGONREALMS_CODES).freeze
 
   class Error < StandardError; end
 
   module_function
 
-  # Returns [{game_code:, game_name:, char_name:}] for every GemStone character on the account
-  # in games the account is subscribed to.
-  def list_characters(account, password, data_dir: nil)
+  # Returns [{game_code:, game_name:, char_name:}] for every character on the account in the games
+  # given by codes (GemStone's unless told otherwise) that the account is subscribed to.
+  def list_characters(account, password, data_dir: nil, codes: GEMSTONE_CODES)
     account = account.to_s.strip
     raise Error, 'Enter the account name.' if account.empty?
     raise Error, 'Enter the password.' if password.to_s.empty?
@@ -36,7 +38,7 @@ module ChronoEAccess
       found = []
       games.sub(/\AM\t/, '').scan(/[^\t]+\t[^\t\n]+/).each do |pair|
         code, name = pair.split("\t")
-        next unless GEMSTONE_CODES.include?(code)
+        next unless codes.include?(code)
         next unless exchange(conn, "N\t#{code}\n").include?('STORM')
         next unless exchange(conn, "F\t#{code}\n") =~ /NORMAL|PREMIUM|TRIAL|INTERNAL|FREE/ # not subscribed: skip
 
