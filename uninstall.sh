@@ -25,14 +25,16 @@ fi
 
 rm -f "$DESKTOP_DIR/chrono.desktop"
 if [ "$(uname -s)" = Darwin ]; then   # Mac: the app and "Open Chrono when I sign in"
-  rm -rf "$HOME/Applications/Chrono.app"
+  for app in "$(cat "$APP/mac_app" 2>/dev/null)" "/Applications/Chrono.app" "$HOME/Applications/Chrono.app"; do
+    [ -n "$app" ] && grep -q 'chrono_gui.rbw' "$app/Contents/MacOS/Chrono" 2>/dev/null && rm -rf "$app"
+  done
   launchctl bootout "gui/$(id -u)/net.chrono4lich.autostart" >/dev/null 2>&1 || true
   rm -f "$HOME/Library/LaunchAgents/net.chrono4lich.autostart.plist"
 fi
 rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/chrono.desktop"   # "Open Chrono when I sign in"
 if grep -q 'chrono.rb' "$BIN/chrono" 2>/dev/null; then rm -f "$BIN/chrono"; fi
 for f in chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_logins.rb chrono_rewards.rb chrono_lich_passwords.rb chrono_github.rb chrono_cronjob.rb chrono_update.rb chrono_sealedbox.rb chrono_gui.rbw chrono_helper.lic chrono.png \
-         README.txt chrono_config.json chrono.log ruby_path uninstall.sh; do
+         README.txt chrono_config.json chrono.log ruby_path mac_app uninstall.sh; do
   rm -f "$APP/$f"
 done
 rmdir "$APP" 2>/dev/null || echo "Left $APP in place because it has other files in it."

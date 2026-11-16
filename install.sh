@@ -20,7 +20,10 @@ FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_lo
 
 IS_MAC=0
 [ "$(uname -s)" = Darwin ] && IS_MAC=1
-MAC_APP="$HOME/Applications/Chrono.app"
+# Mac: the main Applications folder (Finder's sidebar) when this user can write to it, which
+# admin users can without a password; otherwise the one in the home folder.
+if [ -w /Applications ] && [ "${CHRONO_MAC_APPS:-}" = "" ]; then MAC_APP="/Applications/Chrono.app"
+else MAC_APP="${CHRONO_MAC_APPS:-$HOME/Applications}/Chrono.app"; fi
 
 RUBY=""
 ASSUME_YES=0
@@ -152,15 +155,21 @@ EOF
 chmod 755 "$BIN/chrono"
 
 if [ "$IS_MAC" = 1 ]; then
-# ---- Mac: Chrono.app in your Applications folder (a small app that starts Chrono) ----
+# ---- Mac: Chrono.app in the Applications folder (a small app that starts Chrono) ----
+# (an earlier install may have put it in the other Applications folder)
+for old_app in "/Applications/Chrono.app" "$HOME/Applications/Chrono.app"; do
+  [ "$old_app" = "$MAC_APP" ] && continue
+  [ -x "$old_app/Contents/MacOS/Chrono" ] && grep -q 'chrono_gui.rbw' "$old_app/Contents/MacOS/Chrono" 2>/dev/null && rm -rf "$old_app"
+done
 rm -rf "$MAC_APP"
 mkdir -p "$MAC_APP/Contents/MacOS" "$MAC_APP/Contents/Resources"
 cat > "$MAC_APP/Contents/MacOS/Chrono" <<EOF
 #!/bin/sh
 # Made by the Chrono installer. Starts Chrono with the Ruby that runs Lich.
 export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
-cd "$APP" && exec "$RUBY" "$APP/chrono_gui.rbw"
+cd "$APP" && exec "$RUBY" "$APP/chrono_gui.rbw" "\$@"
 EOF
+printf '%s\n' "$MAC_APP" > "$APP/mac_app"   # where it is, for open-at-sign-in and updates
 chmod 755 "$MAC_APP/Contents/MacOS/Chrono"
 cat > "$MAC_APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -221,7 +230,10 @@ rm -f "$APP/.rebuild-output"
 
 say ""
 say " Done."
-if [ "$IS_MAC" = 1 ]; then say "  - \"Chrono\" is in your Applications folder ($MAC_APP)."
+if [ "$IS_MAC" = 1 ]; then
+  if [ "$MAC_APP" = "/Applications/Chrono.app" ]; then say "  - \"Chrono\" is in your Applications folder."
+  else say "  - \"Chrono\" is in the Applications folder inside your home folder ($MAC_APP)."; fi
+  say "    Or press Command-Space and type Chrono."
 else say "  - \"Chrono\" is in your applications menu."; fi
 case ":$PATH:" in
   *":$BIN:"*) say "  - The \"chrono\" command works in a terminal." ;;

@@ -21,7 +21,7 @@ require 'fileutils'
 require 'rbconfig'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.9.0'
+CHRONO_VERSION = '1.9.1'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -473,6 +473,33 @@ module WarlockWindow
     end
   end
 
+  # Warlock stays open, disconnected, after its Lich exits. Once a Warlock character's Lich has
+  # exited after a logout, close its Warlock too: Mac/Linux by ending what's left of Lich's process
+  # group (Warlock is in it), Windows by asking the "Warlock - Name" window to close.
+  def close_after_logout(name, lich_pid)
+    entries = (load_entries rescue [])
+    return unless entries.any? { |e| e[:char_name].to_s.casecmp?(name) && e[:frontend] == SavedLogins::WARLOCK }
+
+    if Gem.win_platform?
+      require 'fiddle'
+      lib = Fiddle.dlopen('user32')
+      find = Fiddle::Function.new(lib['FindWindowW'], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)
+      post = Fiddle::Function.new(lib['PostMessageW'], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_UINT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT)
+      hwnd = find.call(nil, "Warlock - #{name}\0".encode('UTF-16LE'))
+      return if hwnd.null?
+
+      post.call(hwnd, 0x0010, nil, nil) # WM_CLOSE, as clicking its X
+      log "LOGOUT #{name}: closed Warlock's window"
+    else
+      Process.kill('TERM', -lich_pid.to_i) # Lich's group; Lich itself is gone
+      log "LOGOUT #{name}: closed Warlock"
+    end
+  rescue Errno::ESRCH, Errno::EPERM
+    nil # nothing left in the group
+  rescue StandardError, LoadError => e
+    log "LOGOUT #{name}: couldn't close Warlock: #{e.message}"
+  end
+
   # Looks for the character's Warlock window for up to WAIT seconds and maximizes it. true if done.
   def maximize(name)
     title = "Warlock - #{name}\0".encode('UTF-16LE')
@@ -612,6 +639,7 @@ def cmd_logout(specs, timeout, skip_offline: false)
       err = nil
       if !pid_alive?(info[:st]['pid'])
         log "LOGOUT #{name}: logged out"
+        WarlockWindow.close_after_logout(name, info[:st]['pid'])
       elsif (cur = read_status(name)) && cur['state'] == 'logout_failed' && !File.exist?(cmd_path(name))
         err = "could not log out. #{cur['detail']}"
       elsif File.exist?(cmd_path(name)) && Time.now - info[:sent] > ACK_TIMEOUT

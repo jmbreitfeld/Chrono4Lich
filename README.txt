@@ -51,13 +51,15 @@ INSTALL ON MAC
        bash install.sh
      It finds the Ruby you run Lich with (one that has GTK3, usually Homebrew's; Apple's own
      old Ruby can't run Lich), installs for your user only (no admin password) into
-     ~/.local/share/Chrono4Lich, and adds Chrono to your Applications folder plus a "chrono"
-     command. If it picks the wrong Ruby:  bash install.sh --ruby /path/to/ruby
-  3. Open Chrono from your Applications folder. It finds your Lich folder (Desktop/Lich5 and
-     other usual places) or asks you for it.
+     ~/.local/share/Chrono4Lich, and adds Chrono.app to your Applications folder (or, if you
+     can't write there, the Applications folder inside your home folder; it says which) plus
+     a "chrono" command. If it picks the wrong Ruby:  bash install.sh --ruby /path/to/ruby
+  3. Open Chrono from Applications, or press Command-Space and type Chrono. It finds your Lich
+     folder (Lich5 in your home folder, Desktop and other usual places) or asks you for it.
   Schedules and the daily reward run use launchd, the Mac's built-in scheduler
   (~/Library/LaunchAgents/net.chrono4lich.*). Your Mac must be awake and you signed in at
-  the scheduled time. A reward run missed while the Mac slept happens when it wakes; a
+  the scheduled time. A reward run missed while the Mac slept happens when it wakes (not
+  after it was shut down: then it runs the next day); a
   scheduled login or logout more than 10 minutes late is skipped instead (so a 6 PM login
   doesn't happen at 9 AM). Failures show a Mac alert. Updates: "Update now" works the same.
   Uninstall: run ~/.local/share/Chrono4Lich/uninstall.sh
@@ -89,6 +91,8 @@ USING IT
     Lich's standard one; if Warlock isn't found when you log in, put the full path to
     Warlock in the "Warlock command" box. A character saved for Warlock and for another
     frontend logs in with Warlock.
+    Logging a Warlock character out from Chrono also closes its Warlock (otherwise Warlock
+    stays open, disconnected, after Lich exits).
     Full-screen Warlock: Warlock sets its own window size (the last one it used), so Chrono
     adds Warlock's own size options to the command: --width/--height of your screen (without
     the taskbar) and -x 0 -y 0. When Chrono logs the character in (by hand or on a

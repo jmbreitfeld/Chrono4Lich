@@ -246,7 +246,8 @@ module Rewards
   def job(data)
     { description: 'Chrono: claim SimuCoins and daily login rewards',
       args: ['run-rewards', '--notify'], time: data['time'], days: Schedules::DAYS,
-      enabled: true, catch_up: true } # if the computer was off at that time, run when it's back
+      enabled: true, catch_up: true } # missed (computer off/asleep): Windows and Linux run it when it's
+    # back on; launchd on a Mac only when it wakes from sleep, not after a shutdown
   end
 
   def install_task!(data = load)

@@ -147,9 +147,12 @@ module Autostart
   def enable!
     if ChronoConfig.mac?
       FileUtils.mkdir_p(File.dirname(mac_file))
+      app = ChronoUpdate.mac_app
+      # through Chrono.app when there is one, so it shows as "Chrono" with its icon, not "ruby"
+      args = app ? ['/usr/bin/open', '-a', app, '--args', '--minimized'] : [RbConfig.ruby, gui_script, '--minimized']
       File.write(mac_file, Schedules.plist_xml(
         'Label' => 'net.chrono4lich.autostart',
-        'ProgramArguments' => [RbConfig.ruby, gui_script, '--minimized'],
+        'ProgramArguments' => args,
         'WorkingDirectory' => ChronoConfig::APP_DIR,
         'EnvironmentVariables' => { 'PATH' => Schedules::MAC_PATH },
         'RunAtLoad' => true,
@@ -2238,6 +2241,13 @@ class ChronoWindow
   end
 
   def pump_queue
+    if $chrono_quit_signal # see the TERM/HUP trap at the bottom: quit like the close button would
+      gui_log("quitting (asked to by the system: SIG#{$chrono_quit_signal})")
+      $chrono_quit_signal = nil
+      remember_window_size
+      Gtk.main_quit
+      return
+    end
     until @queue.empty?
       kind, *data = @queue.pop
       case kind
@@ -2350,9 +2360,16 @@ begin
   $chrono_window = ChronoWindow.new
   # Automated tests only: lets a test script drive the window. Unused in normal runs.
   load ENV['CHRONO_GUI_TEST'] if ENV['CHRONO_GUI_TEST'] && File.exist?(ENV['CHRONO_GUI_TEST'])
+  # The system asks programs to quit with a signal (macOS at log-out and shutdown, Linux at the
+  # end of a session). Quit cleanly, from the window's own timer, instead of treating it as a crash.
+  %w[TERM HUP].each do |sig|
+    Signal.trap(sig) { $chrono_quit_signal = sig }
+  rescue ArgumentError
+    nil # (no HUP on Windows)
+  end
   Gtk.main
 rescue Exception => e # rubyw has no console, so a crash would otherwise vanish
-  raise if e.is_a?(SystemExit) || e.is_a?(Interrupt)
+  raise if e.is_a?(SystemExit) || e.is_a?(SignalException) # (Interrupt is a SignalException)
   gui_log("CRASH: #{e.class}: #{e.message}\n    #{Array(e.backtrace).first(8).join("\n    ")}")
   begin
     d = Gtk::MessageDialog.new(type: :error, buttons_type: :close,

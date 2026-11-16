@@ -13,7 +13,7 @@ FILES=(chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_lo
 rm -rf dist build && mkdir -p dist build/win/Chrono4Lich build/linux/Chrono4Lich
 
 # Chrono shows its version (About, update check): stamp this release's version into it
-sed -i "s/^CHRONO_VERSION = .*/CHRONO_VERSION = '$VERSION'/" chrono.rb
+sed -i.bak "s/^CHRONO_VERSION = .*/CHRONO_VERSION = '$VERSION'/" chrono.rb && rm -f chrono.rb.bak  # (-i.bak: GNU and Mac sed both take it)
 grep -q "^CHRONO_VERSION = '$VERSION'" chrono.rb || { echo "couldn't set the version in chrono.rb"; exit 1; }
 
 # Windows zip (README with Windows line endings)

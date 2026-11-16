@@ -103,8 +103,10 @@ module ChronoConfig
     list
   end
 
+  # (realpath: on a Mac, ~/lich5 and ~/Lich5 are usually the same folder; count it once,
+  # spelled the way it is on disk)
   def detect
-    candidates.select { |d| valid_lich_dir?(d) }
+    candidates.select { |d| valid_lich_dir?(d) }.map { |d| File.realpath(d) rescue d }.uniq
   end
 
   # Chrono used to be called lichsched. Reuse the Lich folder it had saved, if it's still valid.

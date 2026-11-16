@@ -21,6 +21,14 @@ module ChronoUpdate
 
   module_function
 
+  # Mac: where install.sh put Chrono.app (it records it), or nil.
+  def mac_app
+    path = File.read(File.join(ChronoConfig::APP_DIR, 'mac_app')).strip
+    File.directory?(path) ? path : nil
+  rescue SystemCallError
+    nil
+  end
+
   # Set up with the Windows installer (it leaves uninstall.exe), or on Linux (install.sh)?
   def can_update_here?
     return File.exist?(File.join(ChronoConfig::APP_DIR, 'uninstall.exe')) if ChronoConfig.windows?
@@ -129,8 +137,11 @@ module ChronoUpdate
     app = File.join(ENV['XDG_DATA_HOME'] || File.join(Dir.home, '.local', 'share'), 'Chrono4Lich')
     log_file = File.join(File.dirname(path), 'install.log')
     q = ->(x) { "'#{x.to_s.gsub("'", %q('\\\\''))}'" }
-    relaunch = ENV['CHRONO_UPDATE_NO_RELAUNCH'] == '1' ? 'true' : # (testing only)
-                 "{ #{q.call(ruby)} #{q.call(File.join(app, 'chrono_gui.rbw'))} >/dev/null 2>&1 & }"
+    relaunch = if ENV['CHRONO_UPDATE_NO_RELAUNCH'] == '1' then 'true' # (testing only)
+               elsif ChronoConfig.mac? then "{ open -a \"$(cat #{q.call(File.join(app, 'mac_app'))})\" || " \
+                                            "#{q.call(ruby)} #{q.call(File.join(app, 'chrono_gui.rbw'))} >/dev/null 2>&1 & }"
+               else "{ #{q.call(ruby)} #{q.call(File.join(app, 'chrono_gui.rbw'))} >/dev/null 2>&1 & }"
+               end
     script = "sleep 2; cd #{q.call(src)} && bash ./install.sh --ruby #{q.call(ruby)} --yes > #{q.call(log_file)} 2>&1 " \
              "&& #{relaunch} " \
              "|| { command -v notify-send >/dev/null && notify-send 'Chrono update failed' 'See #{log_file}'; " \
