@@ -84,7 +84,9 @@ USING IT
     characters to the selected account; "Change password..." after changing it on
     play.net; "Remove..." removes the selected character, or the whole account if an
     account is selected. Close Lich's login window first, or saving something there may
-    undo the change.
+    undo the change. "Open frontend logs" opens the folder where the selected login's
+    frontend keeps its game logs (Saga and Warlock; with nothing selected, the frontend
+    all your logins use).
     Warlock: pick "warlock" as the frontend. Lich starts Warlock with a launch command
     saved with the login (Lich's login window shows these as "stormfront" with a custom
     launch). Chrono fills the command in from a login that already uses Warlock, or with
@@ -105,7 +107,12 @@ USING IT
     in Saga's Lich: type  ;autostart add --global chrono_helper  once in any GemStone game
     window, and once in a DragonRealms one if you play it there too (each Lich folder keeps
     its own list). Without it, Chrono starts the login, says it can't follow it, and you
-    log out in Saga. (Saga must use the same Lich folders as Chrono for each game.)
+    log out in Saga. Saga starts each character's Lich from its own setting: the Lich
+    folder set for that character in Saga, or else Saga's default Lich folder. That must be
+    the Lich Chrono uses for the character's game. With a Lich for each game, keep Saga's
+    default on the GemStone one and set each DragonRealms character's Lich folder in Saga
+    to the DragonRealms one. Chrono checks this before handing a login to Saga, and won't
+    log in a character that Saga would start with the other game's Lich.
   DragonRealms: characters saved for DragonRealms are listed with the realm dr (or
     dr-platinum, dr-fallen, dr-test) and log in and out, by hand or on a schedule, like
     GemStone ones. Chrono uses the same Lich folder for both games unless you keep a

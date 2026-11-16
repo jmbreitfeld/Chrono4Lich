@@ -484,6 +484,7 @@ def start_login(entry, scripts)
   who = who_of(entry)
   lich = lich_dir_for(entry[:game_code])
   fail! "#{name} is already online (Lich PID #{read_status(who)['pid']})." if online?(who)
+  check_saga_lich_folder!(entry)
 
   [cmd_path(who), status_path(who)].each { |p| File.delete(p) if File.exist?(p) }
   FileUtils.mkdir_p(File.dirname(status_path(who)))
@@ -538,6 +539,70 @@ def saga_entry?(entry)
   entry[:frontend].to_s.casecmp?('saga') && entry[:custom_launch].to_s.strip.empty?
 end
 
+# Saga starts the character's Lich from its own setting: the Lich folder set for that character in
+# Saga, or else Saga's default Lich folder. Lich doesn't tell Saga which folder to use. With a Lich
+# kept for each game, that setting decides which game's Lich (scripts, settings) the session runs in.
+module SagaPrefs
+  module_function
+
+  # Saga's settings file (Electron's userData folder for Saga).
+  def file
+    return ENV['CHRONO_SAGA_PREFS'] if ENV['CHRONO_SAGA_PREFS'] && !ENV['CHRONO_SAGA_PREFS'].empty? # for testing
+    base = if Gem.win_platform? then ENV['APPDATA'] || File.join(Dir.home, 'AppData', 'Roaming')
+           elsif RUBY_PLATFORM.include?('darwin') then File.join(Dir.home, 'Library', 'Application Support')
+           else ENV['XDG_CONFIG_HOME'] || File.join(Dir.home, '.config')
+           end
+    File.join(base, 'saga', 'prefs.json')
+  end
+
+  # The Lich folder Saga will start this character with, or nil if Chrono can't tell (no Saga
+  # settings, or no folder set). Saga keys its per-character folders "account|game|name", in lower case.
+  def lich_dir_for(account, game_code, name)
+    prefs = JSON.parse(File.read(file))
+    return nil unless prefs.is_a?(Hash)
+
+    key = [account, game_code, name].map { |s| s.to_s.strip.downcase }.join('|')
+    overrides = prefs['lichDirs'].is_a?(Hash) ? prefs['lichDirs'] : {}
+    dir = (overrides[key] || prefs['lichDir']).to_s.strip
+    dir.empty? ? nil : dir
+  rescue SystemCallError, IOError, JSON::ParserError
+    nil
+  end
+
+  # Where Saga writes game logs: the log folder set in Saga, or else "logs" next to its settings.
+  def logs_dir
+    custom = (JSON.parse(File.read(file))['logFolder'] rescue nil).to_s.strip
+    custom.empty? ? File.join(File.dirname(file), 'logs') : custom
+  end
+
+  def same_folder?(a, b)
+    canon =->(d) { (File.realpath(ChronoConfig.normalize(d)) rescue ChronoConfig.normalize(d)) }
+    x, y = canon.(a), canon.(b)
+    # Mac and Windows folder names ignore case
+    Gem.win_platform? || RUBY_PLATFORM.include?('darwin') ? x.casecmp?(y) : x == y
+  end
+end
+
+# A Saga login that Saga would start with a different Lich than the one Chrono uses for that game
+# would run with the wrong scripts and settings (a DragonRealms character in the GemStone Lich, say),
+# and Chrono couldn't see it or log it out. Refuse it and say what to change in Saga.
+def check_saga_lich_folder!(entry)
+  return unless saga_entry?(entry)
+
+  saga_dir = SagaPrefs.lich_dir_for(entry[:user_id], entry[:game_code], entry[:char_name])
+  return unless saga_dir # can't tell: carry on, as before
+
+  want = lich_dir_for(entry[:game_code])
+  return if want.nil? || SagaPrefs.same_folder?(saga_dir, want)
+
+  game = dr_code?(entry[:game_code]) ? 'DragonRealms' : 'GemStone'
+  name = entry[:char_name]
+  fail! "Saga would start #{name} with the Lich in #{ChronoConfig.disp(saga_dir)}, but Chrono uses " \
+        "#{ChronoConfig.disp(want)} for #{game}, so #{name} would run with the wrong Lich's scripts and settings " \
+        "and Chrono couldn't log it out. Not logging in. In Saga, set #{name}'s Lich folder to " \
+        "#{ChronoConfig.disp(want)}, then try again."
+end
+
 # A Saga login after the Lich that handed it over has exited: nil while waiting for the helper
 # in Saga's Lich to report in, :handed once Chrono stops waiting, or raises Fail.
 def saga_handoff_progress(entry, pid, started)
@@ -560,8 +625,9 @@ end
 # Saga's Lich for DragonRealms has to be the folder Chrono uses for DragonRealms, or Chrono looks
 # for the helper's reports in the wrong place.
 def dr_saga_folder_note
-  " (Chrono looks for DragonRealms characters in #{ChronoConfig.disp(DR_LICH_DIR)}; Saga must use that Lich " \
-    'for DragonRealms too. The DragonRealms Lich folder is set on the Settings tab.)'
+  " (Chrono looks for DragonRealms characters in #{ChronoConfig.disp(DR_LICH_DIR)}; Saga must start them with " \
+    "that Lich too: in Saga, set the character's Lich folder to it. Chrono's DragonRealms Lich folder is set " \
+    'on the Settings tab.)'
 end
 
 # ---------- full-screen Warlock (Windows) ----------

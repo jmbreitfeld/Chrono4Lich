@@ -1315,6 +1315,10 @@ class ChronoWindow
     row.pack_end(button('Refresh') { safely { reload_logins } }, expand: false, fill: false)
     page.pack_start(row, expand: false, fill: false)
 
+    logs_row = Gtk::Box.new(:horizontal, 6)
+    logs_row.pack_start(button('Open frontend logs') { safely { open_frontend_logs } }, expand: false, fill: false)
+    page.pack_start(logs_row, expand: false, fill: false)
+
     if SavedLogins.maximize_supported?
       @warlock_max = Gtk::CheckButton.new('Open Warlock full screen for every Warlock login')
       @warlock_max.signal_connect('toggled') do
@@ -1360,9 +1364,9 @@ class ChronoWindow
 
   def reload_logins
     @logins_store.clear
-    text = "Saved logins are in #{saved_logins_kind}."
+    text = "Saved logins are in #{saved_logins_kind} in #{ChronoConfig.disp(LICH_DIR)}."
     if DR_LICH_DIR && DR_LICH_DIR != LICH_DIR
-      text = "GemStone logins are in #{saved_logins_kind}.\nDragonRealms logins are in " \
+      text = "GemStone logins are in #{saved_logins_kind} in #{ChronoConfig.disp(LICH_DIR)}.\nDragonRealms logins are in " \
              "#{SavedLogins.in_folder(DR_LICH_DIR) { saved_logins_kind }} in #{ChronoConfig.disp(DR_LICH_DIR)}."
     end
     @logins_info.text = text
@@ -1490,8 +1494,11 @@ class ChronoWindow
     grid.attach(sc, 0, 4, 2, 1)
 
     frontend = Gtk::ComboBoxText.new
-    SavedLogins.frontends.each { |f| frontend.append_text(f) }
-    frontend.active = 0
+    fronts = SavedLogins.frontends
+    fronts.each { |f| frontend.append_text(f) }
+    # start on the frontend most of the saved logins use
+    usual = (SavedLogins.entries rescue []).map { |e| e[:frontend].to_s }.tally.max_by { |_, n| n }&.first
+    frontend.active = fronts.index(usual) || 0
     grid.attach(label.call('Frontend:'), 0, 5, 1, 1)
     grid.attach(frontend, 1, 5, 1, 1)
 
@@ -1644,6 +1651,55 @@ class ChronoWindow
   def selected_login_account
     it = @logins_view.selection.selected
     it && it[3]
+  end
+
+  # The folders a frontend usually keeps its game logs in, most likely first. Saga's comes from
+  # its own settings; Warlock's is checked on a Mac, and elsewhere follows the folder library it
+  # uses. Chrono doesn't know the others'.
+  def frontend_log_folders(frontend)
+    home = Dir.home
+    case frontend.to_s.downcase
+    when 'saga' then [SagaPrefs.logs_dir]
+    when SavedLogins::WARLOCK
+      if ChronoConfig.mac?
+        [File.join(home, 'Library', 'Logs', 'WarlockFE warlock'), File.join(home, 'Library', 'Logs', 'WarlockFE')]
+      elsif ChronoConfig.windows?
+        local = ENV['LOCALAPPDATA'] || File.join(home, 'AppData', 'Local')
+        [File.join(local, 'warlock', 'WarlockFE', 'Logs'), File.join(local, 'WarlockFE warlock', 'Logs'),
+         File.join(local, 'WarlockFE', 'Logs')]
+      else
+        [File.join(ENV['XDG_STATE_HOME'] || File.join(home, '.local', 'state'), 'WarlockFE'),
+         File.join(ENV['XDG_CACHE_HOME'] || File.join(home, '.cache'), 'WarlockFE', 'logs')]
+      end
+    else []
+    end
+  end
+
+  # Opens the game-log folder of the selected login's frontend (with nothing selected, or an
+  # account, the frontend its logins all use).
+  def open_frontend_logs
+    it = @logins_view.selection.selected
+    entries = SavedLogins.entries
+    fronts =
+      if it && !it[4].to_s.empty? then [it[2].to_s]
+      elsif it then entries.select { |e| e[:user_id].to_s.casecmp?(it[3].to_s) }.map { |e| e[:frontend].to_s }
+      else entries.map { |e| e[:frontend].to_s }
+      end.uniq
+    return error_dialog('No saved logins yet.') if fronts.empty?
+    return error_dialog('These logins use different frontends. Click a character first.') if fronts.size > 1
+
+    fe = fronts.first
+    name = fe.capitalize
+    places = frontend_log_folders(fe)
+    return error_dialog("Chrono doesn't know where #{name} keeps its logs.") if places.empty?
+
+    dir = places.find { |d| File.directory?(d) }
+    unless dir
+      return error_dialog("Didn't find #{name}'s log folder. Looked in:\n\n" +
+                          places.map { |d| ChronoConfig.disp(d) }.join("\n"))
+    end
+    open_folder(dir)
+    append_log("Opened #{name}'s logs: #{ChronoConfig.disp(dir)}")
   end
 
   # The Frontend column: on a character row, click it for a dropdown of frontends (like Lich's).
@@ -1886,11 +1942,6 @@ class ChronoWindow
     dr_change = button('Change DragonRealms folder...') { change_dr_lich_folder }
     @action_buttons << dr_change
     dr_row.pack_start(dr_change, expand: false, fill: false)
-    if DR_LICH_DIR != LICH_DIR
-      same = button('Use the same Lich as GemStone') { change_dr_lich_folder(same: true) }
-      @action_buttons << same
-      dr_row.pack_start(same, expand: false, fill: false)
-    end
     dr_row.pack_start(button('Open DragonRealms folder') { open_folder(DR_LICH_DIR) }, expand: false, fill: false) if separate
     page.pack_start(dr_row, expand: false, fill: false)
 
@@ -1965,16 +2016,13 @@ class ChronoWindow
     Gtk.main_quit
   end
 
-  # Picks the Lich folder DragonRealms characters log in through (same: GemStone's), then
-  # restarts the window, since the folders are read when Chrono starts.
-  def change_dr_lich_folder(same: false)
-    dir = nil
-    unless same
-      dir = LichFolderPicker.browse(@win, title: 'Pick the Lich folder you use for DragonRealms (the one with lich.rbw in it)') or return
-      fail! ChronoConfig.why_invalid(dir) unless ChronoConfig.valid_lich_dir?(dir)
-      dir = ChronoConfig.normalize(dir)
-      dir = nil if dir.casecmp?(LICH_DIR)
-    end
+  # Picks the Lich folder DragonRealms characters log in through (picking GemStone's means
+  # one Lich for both), then restarts the window, since the folders are read when Chrono starts.
+  def change_dr_lich_folder
+    dir = LichFolderPicker.browse(@win, title: 'Pick the Lich folder you use for DragonRealms (the one with lich.rbw in it)') or return
+    fail! ChronoConfig.why_invalid(dir) unless ChronoConfig.valid_lich_dir?(dir)
+    dir = ChronoConfig.normalize(dir)
+    dir = nil if dir.casecmp?(LICH_DIR)
     return if (dir || LICH_DIR).casecmp?(DR_LICH_DIR.to_s)
 
     ChronoConfig.save('dr_lich_dir' => dir)
@@ -2428,7 +2476,8 @@ class ChronoWindow
 
   def pump_queue
     if $chrono_quit_signal # see the TERM/HUP trap at the bottom: quit like the close button would
-      gui_log("quitting (asked to by the system: SIG#{$chrono_quit_signal})")
+      gui_log($chrono_quit_signal == :quit_event ? 'quitting (Quit from the Dock)' :
+                                                    "quitting (asked to by the system: SIG#{$chrono_quit_signal})")
       $chrono_quit_signal = nil
       remember_window_size
       Gtk.main_quit
@@ -2526,6 +2575,28 @@ rescue StandardError => e # a missing icon must never stop the app from opening
   gui_log("Couldn't set the window icon: #{e.class}: #{e.message}")
 end
 
+# macOS: Quit in the Dock icon's menu sends the app a "quit" Apple event. GTK answers it only for
+# apps built on Gtk::Application, so Chrono ignored it. Take it here and quit like the close button,
+# from the window's own timer (the same way as for the signals below).
+def take_mac_quit_event
+  return unless ChronoConfig.mac?
+
+  require 'fiddle'
+  core = Fiddle.dlopen('/System/Library/Frameworks/CoreServices.framework/CoreServices')
+  install = Fiddle::Function.new(core['AEInstallEventHandler'],
+                                 [-Fiddle::TYPE_INT, -Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_CHAR],
+                                 Fiddle::TYPE_SHORT)
+  # kept in a global so it's never garbage-collected while macOS holds a pointer to it
+  $chrono_quit_handler = Fiddle::Closure::BlockCaller.new(Fiddle::TYPE_SHORT, [Fiddle::TYPE_VOIDP] * 3) do
+    $chrono_quit_signal = :quit_event
+    0 # noErr: handled
+  end
+  err = install.call('aevt'.unpack1('N'), 'quit'.unpack1('N'), $chrono_quit_handler, nil, 0)
+  gui_log("Couldn't take Quit from the Dock (error #{err})") unless err.zero?
+rescue StandardError, LoadError => e # never stop the window from opening over this
+  gui_log("Couldn't take Quit from the Dock: #{e.class}: #{e.message}")
+end
+
 begin
   setup_app_identity
   LichFolderPicker.ensure_configured
@@ -2554,6 +2625,7 @@ begin
   rescue ArgumentError
     nil # (no HUP on Windows)
   end
+  take_mac_quit_event
   Gtk.main
 rescue Exception => e # rubyw has no console, so a crash would otherwise vanish
   raise if e.is_a?(SystemExit) || e.is_a?(SignalException) # (Interrupt is a SignalException)
