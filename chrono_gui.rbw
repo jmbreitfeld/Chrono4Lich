@@ -696,10 +696,22 @@ class ChronoWindow
     @rewards_info.wrap = true
     page.pack_start(@rewards_info, expand: false, fill: false)
 
-    # account, simucoins, daily, last result, claim on GitHub, has characters that get daily rewards
-    @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass, TrueClass)
+    # free-to-play accounts get no rewards; hiding them is kept for next time
+    f2p_row = Gtk::Box.new(:horizontal, 12)
+    @hide_f2p = Gtk::CheckButton.new("Don't show F2P")
+    @hide_f2p.active = GuiPrefs.get('hide_f2p', false) == true
+    @hide_f2p.signal_connect('toggled') { safely { GuiPrefs.set('hide_f2p', @hide_f2p.active?); reload_rewards } }
+    f2p_row.pack_start(@hide_f2p, expand: false, fill: false)
+    @rewards_count = Gtk::Label.new('')
+    f2p_row.pack_end(@rewards_count, expand: false, fill: false)
+    page.pack_start(f2p_row, expand: false, fill: false)
+
+    # account, simucoins, daily, last result, claim on GitHub, has characters that get daily rewards,
+    # plan (F2P, Standard, Premium...), free-to-play
+    @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass, TrueClass, String, TrueClass)
     @rewards_view = Gtk::TreeView.new(@rewards_store)
     @rewards_view.append_column(Gtk::TreeViewColumn.new('Account', Gtk::CellRendererText.new, text: 0))
+    @rewards_view.append_column(Gtk::TreeViewColumn.new('Plan', Gtk::CellRendererText.new, text: 6))
     [[1, 'SimuCoins', :coins], [2, 'Daily login rewards', :daily]].each do |col, title, key|
       toggle = Gtk::CellRendererToggle.new
       toggle.signal_connect('toggled') do |_, path|
@@ -712,8 +724,9 @@ class ChronoWindow
         end
       end
       column = Gtk::TreeViewColumn.new(title, toggle, active: col)
-      if key == :daily # no box for an account with no characters that get daily rewards
-        column.set_cell_data_func(toggle) { |_c, r, _m, it| r.activatable = r.visible = it[5] }
+      # no box for a free-to-play account, nor a daily one for an account with no characters that get them
+      column.set_cell_data_func(toggle) do |_c, r, _m, it|
+        r.activatable = r.visible = !it[7] && (key != :daily || it[5])
       end
       @rewards_view.append_column(column)
     end
@@ -727,7 +740,9 @@ class ChronoWindow
         reload_rewards
       end
     end
-    @rewards_view.append_column(Gtk::TreeViewColumn.new('Claim on GitHub', gh_toggle, active: 4))
+    gh_col = Gtk::TreeViewColumn.new('Claim on GitHub', gh_toggle, active: 4)
+    gh_col.set_cell_data_func(gh_toggle) { |_c, r, _m, it| r.activatable = r.visible = !it[7] }
+    @rewards_view.append_column(gh_col)
     last = Gtk::TreeViewColumn.new('Last result', Gtk::CellRendererText.new, text: 3)
     last.expand = true
     @rewards_view.append_column(last)
@@ -820,7 +835,10 @@ class ChronoWindow
       end
     selected = @rewards_view.selection.selected&.[](0)
     @rewards_store.clear
-    Rewards.accounts(data).each do |a|
+    all = Rewards.accounts(data)
+    shown = @hide_f2p&.active? ? all.reject { |a| a[:free] } : all
+    @rewards_count&.text = shown.size == all.size ? "#{all.size} accounts" : "#{shown.size} of #{all.size} shown"
+    shown.each do |a|
       it = @rewards_store.append
       it[0] = a[:name]
       it[1] = a[:coins]
@@ -828,6 +846,8 @@ class ChronoWindow
       it[3] = a[:where] == 'github' ? 'claimed on GitHub (see "Open results on GitHub")' : Rewards.summary(a[:last])
       it[4] = a[:where] == 'github'
       it[5] = a[:daily_ok]
+      it[6] = a[:plan].to_s
+      it[7] = a[:free]
       @rewards_view.selection.select_iter(it) if a[:name] == selected
     end
     reload_github_status(data)

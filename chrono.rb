@@ -988,8 +988,8 @@ def cmd_rewards
   list = Rewards.accounts(data)
   puts 'No saved accounts yet.' if list.empty?
   list.each do |a|
-    puts format('  %-16s SimuCoins %-4s Daily logins %-4s Claim on %-7s %s', a[:name], a[:coins] ? 'on' : 'off',
-                a[:daily] ? 'on' : 'off', a[:where] == 'github' ? 'GitHub' : 'this PC',
+    puts format('  %-16s %-9s SimuCoins %-4s Daily logins %-4s Claim on %-7s %s', a[:name], a[:plan] || '?',
+                a[:coins] ? 'on' : 'off', a[:daily] ? 'on' : 'off', a[:where] == 'github' ? 'GitHub' : 'this PC',
                 a[:where] == 'github' ? '' : Rewards.summary(a[:last]))
   end
   gh = Rewards.github_state(data)

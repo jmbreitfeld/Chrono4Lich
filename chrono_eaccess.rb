@@ -56,6 +56,28 @@ module ChronoEAccess
     end
   end
 
+  # The account's plan in each of the given games it plays: {code => 'NORMAL'|'PREMIUM'|'TRIAL'|
+  # 'INTERNAL'|'FREE'}, the same answer Lich reads at login. FREE is free-to-play. Games the account
+  # doesn't play (the service says NEW_TO_GAME) are left out.
+  def plans(account, password, codes: ALL_CODES, data_dir: nil)
+    conn = connect(data_dir)
+    begin
+      games = authenticate(conn, account, password)
+      found = {}
+      games.sub(/\AM\t/, '').scan(/[^\t]+\t[^\t\n]+/).each do |pair|
+        code = pair.split("\t").first
+        next unless codes.include?(code)
+        next unless exchange(conn, "N\t#{code}\n").include?('STORM')
+
+        tier = exchange(conn, "F\t#{code}\n")[/NORMAL|PREMIUM|TRIAL|INTERNAL|FREE/]
+        found[code] = tier if tier
+      end
+      found
+    ensure
+      conn.close rescue nil
+    end
+  end
+
   # Asks for a one-time key to enter the game as one character, the same way Lich does before
   # it connects. Returns {host:, port:, key:}. Using the key is what actually logs the character in.
   def launch_key(account, password, game_code, char_name, data_dir: nil)

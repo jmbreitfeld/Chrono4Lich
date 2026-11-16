@@ -39,6 +39,7 @@ module Rewards
     data['enabled'] = false unless data.key?('enabled')
     data['accounts'] ||= {}
     data['last'] ||= {}
+    data['plans'] ||= {} # account => {'plan' => 'F2P'|'Standard'|..., 'at' => time}, from the login service
     unless data['time']
       # spread everyone's runs out, as simu-rewards asks: a random evening time, never :00 or :30.
       # Picked once and kept.
@@ -74,9 +75,48 @@ module Rewards
       mine = entries.select { |e| e[:user_id].to_s.casecmp?(a) }
       gs = mine.any? { |e| !dr_code?(e[:game_code]) }
       daily_ok = mine.any? { |e| DAILY_GAMES.include?(e[:game_code].to_s.upcase) }
+      plan = plan_of(data, a)
       { name: a, coins: cfg.fetch('coins', true), daily: daily_ok && cfg.fetch('daily', false),
-        daily_ok: daily_ok, store_game: gs ? 'GS' : 'DR', where: cfg.fetch('where', 'pc'), last: data['last'][a] }
+        daily_ok: daily_ok, store_game: gs ? 'GS' : 'DR', where: cfg.fetch('where', 'pc'), last: data['last'][a],
+        plan: plan, free: plan == 'F2P' }
     end
+  end
+
+  # ---------- free-to-play ----------
+  # Free-to-play accounts get no SimuCoin bonus and no daily login rewards, so runs skip them.
+  # Each run asks the login service for the account's plan (as Lich does at login) and keeps it.
+
+  PLAN_NAMES = { 'FREE' => 'F2P', 'TRIAL' => 'Trial', 'NORMAL' => 'Standard', 'PREMIUM' => 'Premium',
+                 'INTERNAL' => 'Internal' }.freeze
+  PLAN_GAMES = %w[GS3 GSX GSF DR DRX DRF].freeze # not the test servers
+
+  # The plan Chrono knows for an account: the one last read from the login service, or, before
+  # that, what the store last showed: no subscription reward at all (F2P) or one (Paid). nil if unknown.
+  def plan_of(data, account)
+    known = data.dig('plans', account, 'plan')
+    return known if known
+
+    case data.dig('last', account, 'coins', 'status')
+    when 'none' then 'F2P'
+    when 'claimed', 'not_due' then 'Paid'
+    end
+  end
+
+  # Asks the login service for the account's plan, keeps it, and returns it: F2P when it's free in
+  # every game it plays, else its best plan. nil if the service couldn't be asked.
+  def check_plan(account, password)
+    tiers = ChronoEAccess.plans(account, password, codes: PLAN_GAMES, data_dir: DATA_DIR)
+    return nil if tiers.empty?
+
+    best = tiers.values.max_by { |t| %w[FREE TRIAL NORMAL PREMIUM INTERNAL].index(t) }
+    plan = PLAN_NAMES[best]
+    data = load
+    data['plans'][account] = { 'plan' => plan, 'at' => Time.now.to_i }
+    save(data)
+    plan
+  rescue ChronoEAccess::Error => e
+    log "REWARDS #{account}: couldn't check the account's plan (#{e.message}); claiming as usual"
+    nil
   end
 
   def set_account(name, coins: nil, daily: nil, where: nil)
@@ -577,9 +617,12 @@ module Rewards
       name = acct[:name]
       result = { 'at' => Time.now.to_i, 'ok' => true }
       password = pw[name]
-      unless password && !password.empty?
+      if password.to_s.empty?
         result.merge!('ok' => false, 'error' => 'no saved password for this account')
         log "!!! REWARDS #{name}: no saved password for this account", $stderr
+      elsif check_plan(name, password) == 'F2P'
+        result['free'] = true
+        log "REWARDS #{name}: free-to-play account, so there's nothing to claim (no SimuCoin bonus or daily rewards)"
       else
         if acct[:coins] || !named.empty? # an account claimed by name always gets its SimuCoins checked
           begin
@@ -652,6 +695,9 @@ module Rewards
     if result['error']
       rows << base.merge('reward' => '-', 'status' => 'error', 'text' => result['error'], 'ok' => false)
     end
+    if result['free']
+      rows << base.merge('reward' => '-', 'status' => 'free', 'text' => 'free-to-play: nothing to claim', 'ok' => true)
+    end
     return if rows.empty?
 
     list = (history + rows).last(HISTORY_KEEP)
@@ -673,6 +719,8 @@ module Rewards
   def summary(last)
     return 'never run' unless last
     when_s = Time.at(last['at']).strftime('%b %-d %-I:%M %p')
+    return "#{when_s}: free-to-play, nothing to claim" if last['free']
+
     parts = []
     parts << (last['error'] || '') if last['error']
     if (c = last['coins'])
