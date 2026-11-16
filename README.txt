@@ -117,7 +117,8 @@ USING IT
     dr-platinum, dr-fallen, dr-test) and log in and out, by hand or on a schedule, like
     GemStone ones. Chrono uses the same Lich folder for both games unless you keep a
     separate Lich for DragonRealms (e.g. Lich5-DR): then pick it on the Settings tab with
-    "Change DragonRealms folder...". Daily rewards are GemStone only.
+    "Change DragonRealms folder...". SimuCoins are claimed for DragonRealms accounts too;
+    daily login rewards are GemStone only.
   Settings tab: colors (Match my computer, Light or Dark) and text size (Normal to Huge),
     which apply right away; change the Lich folder (and the DragonRealms one), open the
     log folder, rebuild the scheduled tasks, check for updates, and "Open Chrono
@@ -169,7 +170,8 @@ REWARDS
     offered. "Next Subscription Bonus..." just means it isn't due yet. If the computer
     was off at the scheduled time, the run happens as soon as it's back on.
   - Daily login rewards (off unless you tick it, per account): Chrono briefly logs in
-    each Prime character on the account, collects the reward, and quits. Don't turn this
+    each GemStone Prime character on the account, collects the reward, and quits. (No box
+    for an account with no GemStone characters.) Don't turn this
     on for an account you might be playing at that time: a character online somewhere
     Chrono didn't start would be disconnected. If a character Chrono started is online,
     that account's daily logins are skipped that day.

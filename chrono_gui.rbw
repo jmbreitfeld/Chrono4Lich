@@ -519,6 +519,32 @@ class ChronoWindow
     outer = Gtk::Box.new(:vertical, 8)
     outer.margin = 6
 
+    # filters, kept for next time (GemStone only and DragonRealms only exclude each other)
+    filters = Gtk::Box.new(:horizontal, 12)
+    @hide_test = Gtk::CheckButton.new("Don't show Test")
+    @gs_only = Gtk::CheckButton.new('GemStone only')
+    @dr_only = Gtk::CheckButton.new('DragonRealms only')
+    @hide_test.active = GuiPrefs.get('hide_test', false) == true
+    @gs_only.active = GuiPrefs.get('game_filter', nil) == 'gs'
+    @dr_only.active = GuiPrefs.get('game_filter', nil) == 'dr'
+    @hide_test.signal_connect('toggled') { safely { filters_changed } }
+    [[@gs_only, @dr_only], [@dr_only, @gs_only]].each do |box, other|
+      box.signal_connect('toggled') do
+        safely do
+          if box.active? && other.active?
+            @filters_syncing = true
+            other.active = false
+            @filters_syncing = false
+          end
+          filters_changed
+        end
+      end
+    end
+    [@hide_test, @gs_only, @dr_only].each { |c| filters.pack_start(c, expand: false, fill: false) }
+    @filter_count = Gtk::Label.new('')
+    filters.pack_end(@filter_count, expand: false, fill: false)
+    outer.pack_start(filters, expand: false, fill: false)
+
     # character list
     @store = Gtk::ListStore.new(TrueClass, String, String, String, String, String)
     @view = Gtk::TreeView.new(@store)
@@ -670,9 +696,8 @@ class ChronoWindow
     @rewards_info.wrap = true
     page.pack_start(@rewards_info, expand: false, fill: false)
 
-    # account, simucoins, daily, last result
-    # account, simucoins, daily, last result, claim on GitHub
-    @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass)
+    # account, simucoins, daily, last result, claim on GitHub, has GemStone characters
+    @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass, TrueClass)
     @rewards_view = Gtk::TreeView.new(@rewards_store)
     @rewards_view.append_column(Gtk::TreeViewColumn.new('Account', Gtk::CellRendererText.new, text: 0))
     [[1, 'SimuCoins', :coins], [2, 'Daily login rewards', :daily]].each do |col, title, key|
@@ -686,7 +711,11 @@ class ChronoWindow
           reload_github_status
         end
       end
-      @rewards_view.append_column(Gtk::TreeViewColumn.new(title, toggle, active: col))
+      column = Gtk::TreeViewColumn.new(title, toggle, active: col)
+      if key == :daily # GemStone only: no box for an account with no GemStone characters
+        column.set_cell_data_func(toggle) { |_c, r, _m, it| r.activatable = r.visible = it[5] }
+      end
+      @rewards_view.append_column(column)
     end
     gh_toggle = Gtk::CellRendererToggle.new
     gh_toggle.signal_connect('toggled') do |_, path|
@@ -798,6 +827,7 @@ class ChronoWindow
       it[2] = a[:daily]
       it[3] = a[:where] == 'github' ? 'claimed on GitHub (see "Open results on GitHub")' : Rewards.summary(a[:last])
       it[4] = a[:where] == 'github'
+      it[5] = a[:gemstone]
       @rewards_view.selection.select_iter(it) if a[:name] == selected
     end
     reload_github_status(data)
@@ -1410,6 +1440,7 @@ class ChronoWindow
     reload_logins
     reload_characters
     refresh_status
+    reload_rewards # its accounts come from the saved logins
   end
 
   # Runs slow work (network, Lich commands) off the window's thread. The window stays
@@ -2271,7 +2302,9 @@ class ChronoWindow
       return
     end
     entries = load_entries
-    shown = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
+    all = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
+    shown = all.select { |e| shown_by_filters?(e) }
+    @filter_count&.text = shown.size == all.size ? "#{all.size} characters" : "#{shown.size} of #{all.size} shown"
     shown.sort_by { |e| game_order(e) }.each do |e|
       spec = "#{e[:char_name]}:#{realm_of(e)}"
       iter = @store.append
@@ -2282,8 +2315,28 @@ class ChronoWindow
       iter[COL_STATUS]  = ''
       iter[COL_SPEC]    = spec
     end
-    append_log("Loaded #{shown.size} saved characters.") unless @loaded_message_shown
+    append_log("Loaded #{all.size} saved characters.") unless @loaded_message_shown
     @loaded_message_shown = true
+  end
+
+  # The Characters tab's filters. A character they hide isn't ticked: buttons act only on what's shown.
+  def shown_by_filters?(entry)
+    code = entry[:game_code].to_s.upcase
+    return false if @hide_test&.active? && %w[GST DRT].include?(code)
+    return false if @gs_only&.active? && dr_code?(code)
+    return false if @dr_only&.active? && !dr_code?(code)
+
+    true
+  end
+
+  def filters_changed
+    return if @filters_syncing
+
+    GuiPrefs.set('hide_test', @hide_test.active?)
+    GuiPrefs.set('game_filter', @gs_only.active? ? 'gs' : (@dr_only.active? ? 'dr' : nil))
+    reload_characters
+    refresh_status
+    remember_selection
   end
 
   def refresh_status

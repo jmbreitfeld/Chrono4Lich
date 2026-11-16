@@ -62,14 +62,17 @@ module Rewards
     (load_entries rescue []).reject { |e| dr_code?(e[:game_code]) }
   end
 
-  # Accounts from the saved logins, with their reward settings.
-  # SimuCoins are claimed for every account unless turned off; daily login rewards are off
-  # unless turned on.
+  # Accounts from the saved logins (both games), with their reward settings.
+  # SimuCoins (store.play.net, per account) are claimed for every account unless turned off.
+  # Daily login rewards are off unless turned on, and only for accounts with GemStone
+  # characters (gemstone: true): they're a GemStone Prime thing.
   def accounts(data = load)
-    names = gemstone_entries.map { |e| e[:user_id].to_s.upcase }.uniq.sort
+    entries = (load_entries rescue [])
+    names = entries.map { |e| e[:user_id].to_s.upcase }.uniq.sort
     names.map do |a|
       cfg = data['accounts'][a] || {}
-      { name: a, coins: cfg.fetch('coins', true), daily: cfg.fetch('daily', false),
+      gs = entries.any? { |e| e[:user_id].to_s.casecmp?(a) && !dr_code?(e[:game_code]) }
+      { name: a, coins: cfg.fetch('coins', true), daily: gs && cfg.fetch('daily', false), gemstone: gs,
         where: cfg.fetch('where', 'pc'), last: data['last'][a] }
     end
   end
@@ -283,8 +286,16 @@ module Rewards
 
   # ---------- passwords from Lich's saved logins ----------
 
-  # {ACCOUNT => password}
+  # {ACCOUNT => password}, from every Lich folder Chrono uses (a separate DragonRealms Lich keeps
+  # its own saved logins). An account saved in both comes from the GemStone one.
   def passwords
+    lich_folders.reverse.each_with_object({}) do |dir, all|
+      all.merge!(SavedLogins.in_folder(dir) { passwords_here })
+    end
+  end
+
+  # The saved passwords in the Lich folder SavedLogins is working in.
+  def passwords_here
     if SavedLogins.backend == :dat
       SavedLogins.dat_entries.to_h { |e| [e[:user_id].to_s.upcase, e[:password].to_s] }
     else
@@ -316,7 +327,8 @@ module Rewards
     out = +''
     err = +''
     status = nil
-    Open3.popen3(rubyw_path, script, LICH_DIR, chdir: LICH_DIR) do |stdin, stdout, stderr, thr|
+    dir = SavedLogins.lich_dir
+    Open3.popen3(rubyw_path, script, dir, chdir: dir) do |stdin, stdout, stderr, thr|
       stdin.close
       readers = [Thread.new { out << stdout.read }, Thread.new { err << stderr.read }]
       unless thr.join(60)
