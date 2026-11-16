@@ -554,7 +554,8 @@ class ChronoWindow
       iter[COL_CHECK] = !iter[COL_CHECK]
       remember_selection
     end
-    @view.append_column(Gtk::TreeViewColumn.new('', toggle, active: COL_CHECK))
+    @check_col = Gtk::TreeViewColumn.new('', toggle, active: COL_CHECK)
+    @view.append_column(@check_col)
     [['Character', COL_NAME], ['Realm', COL_REALM], ['Account', COL_ACCOUNT], ['Status', COL_STATUS]].each do |title, col|
       column = Gtk::TreeViewColumn.new(title, Gtk::CellRendererText.new, text: col)
       column.resizable = true
@@ -586,6 +587,15 @@ class ChronoWindow
         false
       end
     end
+    # Double-clicking a character (or Enter on it) does what its row's button does: Log in or Log out.
+    # (Double-clicking the tick box only ticks it; the button handles its own clicks above.)
+    @view.signal_connect('row-activated') do |_view, path, column|
+      next if column == @check_col
+
+      iter = @store.get_iter(path)
+      action = iter && row_action(iter)
+      GLib::Idle.add { safely { row_action_clicked(iter[COL_SPEC], iter[COL_NAME], action) }; false } if action
+    end
     list_scroll = Gtk::ScrolledWindow.new
     list_scroll.set_policy(:automatic, :automatic)
     list_scroll.add(@view)
@@ -595,6 +605,10 @@ class ChronoWindow
     row1 = Gtk::Box.new(:horizontal, 6)
     row1.pack_start(button('Select all') { set_all_checks(true) }, expand: false, fill: false)
     row1.pack_start(button('Select none') { set_all_checks(false) }, expand: false, fill: false)
+    hint = Gtk::Label.new('Tip: double-click a character to log it in or out.')
+    hint.style_context.add_class('dim-label')
+    hint.margin_start = 6
+    row1.pack_start(hint, expand: false, fill: false)
     row1.pack_end(button('Reload characters') { reload_characters; refresh_status }, expand: false, fill: false)
     outer.pack_start(row1, expand: false, fill: false)
 

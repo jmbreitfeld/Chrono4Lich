@@ -67,7 +67,8 @@ INSTALL ON MAC
 USING IT
   Characters tab: tick characters, then Log in selected / Log out selected /
     Log out all. Or click the "Log in" button at the end of a row to log in just that
-    character (it says "Log out" while the character is online). Ticked characters log in at the same time (each one starts two
+    character (it says "Log out" while the character is online), or double-click the
+    character. Ticked characters log in at the same time (each one starts two
     seconds after the last, so they don't all hit the login server at once). "Force close" is only for when a normal logout fails; the
     character may stay linkdead in the game for a while.
   Schedules tab: New... makes a schedule (characters, days, login time, optional
