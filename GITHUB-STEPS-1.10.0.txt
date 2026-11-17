@@ -1,0 +1,73 @@
+Putting Chrono 1.10.0 on GitHub (the security-review release)
+==============================================================
+Do these in order. Steps 1-3 are one-time setup; 4-6 are the release itself.
+(This file is for you; you don't need to upload it.)
+
+
+1. MAKE THE RELEASE-SIGNING KEY (on your PC, about 2 minutes)
+   Chrono now only installs updates whose checksum list is signed with your key.
+   a. Open the "tools" folder from this zip. Click the address bar of that File Explorer
+      window, type  cmd  and press Enter. A Command Prompt opens in that folder.
+   b. Type this and press Enter:
+        C:\Ruby4Lich5\current\bin\ruby.exe make_release_key.rb
+      (If that path doesn't exist, use the ruby.exe next to the rubyw.exe that runs Lich.)
+   c. It makes two files in the tools folder:
+        release-signing-key.txt   SECRET - never upload or share it
+        release-signing.pub       public - goes in the repository (step 3)
+   d. On GitHub: your Chrono4Lich repo > Settings > Secrets and variables > Actions >
+      New repository secret.  Name: CHRONO_RELEASE_KEY   Secret: open
+      release-signing-key.txt in Notepad, copy ALL of it (including the BEGIN/END lines),
+      paste. Click "Add secret".
+   e. Copy release-signing-key.txt to a USB stick (a backup), then delete it from the PC.
+      If it's ever lost, you make a new key, and everyone updates once from the release page.
+
+2. CODE SIGNING (SignPath)
+   If SignPath is already set up (the SIGNPATH_ORGANIZATION_ID variable exists under
+   Settings > Secrets and variables > Actions > Variables), skip this step.
+   If not: releases now stop with an error instead of quietly going out unsigned. To
+   release unsigned on purpose until SignPath approves you, add a Variable (not a secret):
+      Name: ALLOW_UNSIGNED_RELEASE    Value: true
+   Remove it once SignPath is set up.
+
+3. UPDATE THE FILES IN THE REPOSITORY
+   a. Repo > Add file > Upload files. Drag in everything from this zip EXCEPT the
+      ".github" folder, the files starting with a dot, and this GITHUB-STEPS file.
+      Also drag in release-signing.pub from step 1. Include the "test" and "tools"
+      folders (drag the folders themselves). Commit.
+   b. Files whose names start with a dot don't upload by dragging, so make them by hand.
+      For each one: Add file > Create new file, type the name exactly (the slashes make the
+      folders), paste the contents of that file from this zip, Commit.
+        .github/workflows/release.yml   (already exists: open it, click the pencil, select
+                                         all, paste the new one over it, Commit)
+        .github/workflows/checks.yml    (new)
+        .github/dependabot.yml          (new)
+   c. Fix the misnamed files the reviewer spotted. Open each, click the pencil, and change
+      the file name box at the top, then Commit:
+        "download"       -> rename to  .gitattributes
+        "download (1)"   -> rename to  .gitignore   and replace its contents with the
+                                        .gitignore from this zip
+        "artifact-configuration.xml" (at the top) -> rename to
+                                        .signpath/artifact-configuration.xml
+   d. Delete the old copy of release.yml at the top of the repo (not the one in
+      .github/workflows): open it > the "..." menu > Delete file > Commit.
+
+4. REPOSITORY SETTINGS (the reviewer's recommendations; each is a checkbox)
+   - Settings > General (or "Code security"): turn on "Private vulnerability reporting",
+     so people can report problems privately (SECURITY.md points there).
+   - Settings > General > Releases: turn on "Immutable releases" if you see it.
+   - Settings > Rules > Rulesets > New tag ruleset: target tags matching  v*  and tick
+     "Restrict deletions" and "Restrict updates". Save.
+   - Settings > Code security: turn on Dependabot alerts / version updates if offered.
+
+5. CHECK IT'S HAPPY
+   Actions tab: the "Checks" workflow runs by itself after each commit. It should be green.
+
+6. RELEASE
+   Actions > Release > Run workflow (branch: main), version 1.10.0, Run workflow.
+   Approve the SignPath request if you use it. The release appears with these files:
+   setup exe, zip, linux and mac tar.gz, SHA256SUMS.txt and SHA256SUMS.txt.sig.
+   (Running it again for 1.10.0 will fail on purpose: a release's files are never
+   replaced. A fix goes out as 1.10.1.)
+
+Players on 1.9.1 update to 1.10.0 the usual way (Update now). From 1.10.0 on, every update
+must be signed with your key.

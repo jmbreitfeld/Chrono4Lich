@@ -4,18 +4,30 @@
 # It only lists characters; it never launches a game session, so nothing gets logged in.
 # The password is used only on this connection: it is never written anywhere or logged.
 #
-# Security: if Lich has pinned Simutronics' certificate (data/simu.pem), the connection must
-# match it. If Lich hasn't (first use), the certificate is accepted, as Lich itself does then.
+# Security: the login service uses its own (self-signed) certificate. Before anything is sent,
+# the certificate it presents must be exactly one Chrono knows: the one Lich saved (data/simu.pem,
+# which Lich keeps up to date), or one listed in KNOWN_CERTS below. Anything else, Chrono stops,
+# so the password never goes to an impostor. (The password is only masked on the wire, not
+# encrypted, so that check is what protects it.)
 
 require 'openssl'
 require 'socket'
 require 'io/wait'
+require 'digest'
+require_relative 'chrono_config'
 
 module ChronoEAccess
-  HOST = ENV['CHRONO_EACCESS_HOST'] || 'eaccess.play.net' # override for testing only
-  PORT = Integer(ENV['CHRONO_EACCESS_PORT'] || 7910)
-  CONNECT_TIMEOUT = 8
-  READ_TIMEOUT    = 15
+  HOST = ChronoConfig.dev_env('CHRONO_EACCESS_HOST') || 'eaccess.play.net' # (testing only)
+  PORT = Integer(ChronoConfig.dev_env('CHRONO_EACCESS_PORT') || 7910)
+  CONNECT_TIMEOUT   = 8
+  HANDSHAKE_TIMEOUT = 15
+  READ_TIMEOUT      = 15
+  # SHA-256 of Simutronics' eAccess certificate(s) (DER), for players whose Lich hasn't saved
+  # simu.pem yet. Lich's simu.pem is trusted as well, so a certificate change Lich has picked up
+  # keeps working; add the new one here in the next release.
+  KNOWN_CERTS = [
+    '10b737e661987d15bc5c8245e3f8b78291d41ed8abc76672ecb02fe78ed0218a' # Simutronics Corp., Missouri; issued 2018-07-16, valid until 3017
+  ].freeze
   GEMSTONE_CODES  = %w[GS3 GSF GST GSX].freeze
 
   class Error < StandardError; end
@@ -118,35 +130,65 @@ module ChronoEAccess
       raise Error, "Couldn't reach the login service (#{HOST}:#{PORT}): #{e.message}"
     end
 
-    pem = data_dir && File.join(data_dir, 'simu.pem')
+    trusted = trusted_certs(data_dir)
+    # The certificate is self-signed, so the usual checks can't apply; it's compared exactly below,
+    # after the handshake and before anything is sent.
     ctx = OpenSSL::SSL::SSLContext.new
-    if pem && File.exist?(pem)
-      store = OpenSSL::X509::Store.new
-      store.add_file(pem)
-      ctx.cert_store = store
-      ctx.verify_mode = OpenSSL::SSL::VERIFY_PEER
-    else
-      ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
-    end
+    ctx.verify_mode = OpenSSL::SSL::VERIFY_NONE
     ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
     ssl.sync_close = true
     begin
-      ssl.connect
-    rescue OpenSSL::SSL::SSLError => e
+      handshake(ssl)
+    rescue OpenSSL::SSL::SSLError, SystemCallError, IOError => e
       tcp.close rescue nil
-      if pem && File.exist?(pem) && e.message =~ /certificate/i
-        raise Error, 'The login service\'s security certificate doesn\'t match the one Lich saved. ' \
-                     'Log in once with Lich (it updates the saved certificate), then try again.'
-      end
       raise Error, "Secure connection to the login service failed: #{e.message}"
     end
-    if pem && File.exist?(pem) && ssl.peer_cert.to_pem != File.read(pem)
-      ssl.close
-      raise Error, 'The login service\'s security certificate doesn\'t match the one Lich saved. ' \
-                   'Log in once with Lich (it updates the saved certificate), then try again.'
+    seen = ssl.peer_cert && Digest::SHA256.hexdigest(ssl.peer_cert.to_der)
+    unless seen && trusted.include?(seen)
+      ssl.close rescue nil
+      if trusted.empty?
+        raise Error, 'Chrono can\'t confirm it\'s talking to Simutronics yet: Lich hasn\'t saved the login ' \
+                     'service\'s certificate. Log in to any character once with Lich (that saves it), then try again.'
+      end
+      saved = data_dir && File.exist?(File.join(data_dir, 'simu.pem')) ? 'the one Lich saved' : 'Simutronics\' known one'
+      raise Error, "The login service's security certificate isn't #{saved}, so Chrono stopped " \
+                   'before sending the password. Log in once with Lich (it updates the saved certificate ' \
+                   'if Simutronics changed it), then try again. If it keeps happening, your connection may ' \
+                   'be being intercepted.'
     end
     ssl
   end
+
+  # SHA-256 fingerprints of the certificates Chrono accepts.
+  def trusted_certs(data_dir)
+    list = KNOWN_CERTS.map(&:downcase)
+    pem = data_dir && File.join(data_dir, 'simu.pem')
+    if pem && File.exist?(pem)
+      begin
+        File.read(pem).scan(/-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----/m).each do |c|
+          list << Digest::SHA256.hexdigest(OpenSSL::X509::Certificate.new(c).to_der)
+        end
+      rescue OpenSSL::X509::CertificateError, SystemCallError
+        nil # an unreadable simu.pem just doesn't count
+      end
+    end
+    list.uniq
+  end
+
+  # TLS handshake with a deadline, so a server that stops partway can't hang a scheduled run.
+  def handshake(ssl)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + HANDSHAKE_TIMEOUT
+    loop do
+      case ssl.connect_nonblock(exception: false)
+      when :wait_readable then wait = ssl.to_io.wait_readable(left(deadline))
+      when :wait_writable then wait = ssl.to_io.wait_writable(left(deadline))
+      else return
+      end
+      raise Error, 'The login service didn\'t complete a secure connection in time. Try again in a minute.' unless wait
+    end
+  end
+
+  def left(deadline) = [deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0].max
 
   # One command, one reply, like Lich: the service doesn't reliably end replies with a newline.
   def exchange(conn, command)

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chrono's SignPath artifact configuration (a copy of what's set on signpath.io).
+     GitHub uploads the installer inside a zip, so the zip is the root. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Chrono4Lich-setup-*.exe" product-name="Chrono">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

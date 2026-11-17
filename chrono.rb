@@ -19,9 +19,11 @@
 require 'json'
 require 'fileutils'
 require 'rbconfig'
+require 'time'
+require 'etc'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.9.1'
+CHRONO_VERSION = '1.10.0'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -35,6 +37,26 @@ end
 DATA_DIR   = LICH_DIR && File.join(LICH_DIR, 'data')
 SCRIPT_DIR = LICH_DIR && File.join(LICH_DIR, 'scripts')
 STATE_DIR  = LICH_DIR && File.join(DATA_DIR, 'chrono')
+
+# Chrono's own folder (Lich5/data/chrono): its log, settings, and backups of Lich's saved logins.
+# On Linux and Mac only the player's own account may open it (0700, files 0600). On Windows it
+# keeps the Lich folder's permissions, which are already the player's own.
+def ensure_state_dir
+  FileUtils.mkdir_p(STATE_DIR)
+  return if $chrono_state_dir_ready || Gem.win_platform?
+
+  $chrono_state_dir_ready = true
+  File.chmod(0o700, STATE_DIR)
+  Dir.glob(File.join(STATE_DIR, '**', '*')).each do |f|
+    next if File.symlink?(f)
+    File.chmod(File.directory?(f) ? 0o700 : 0o600, f)
+  rescue SystemCallError
+    nil
+  end
+rescue SystemCallError
+  nil
+end
+
 require_relative 'chrono_eaccess'
 require_relative 'chrono_logins'
 HELPER     = 'chrono_helper'
@@ -61,8 +83,8 @@ ERRORS_SEEN = [] # every error logged this run, for the --notify pop-up
 def log(msg, io = $stdout)
   line = "#{Time.now.strftime('%Y-%m-%d %H:%M:%S')}  #{msg}"
   if STATE_DIR
-    FileUtils.mkdir_p(STATE_DIR)
-    File.open(File.join(STATE_DIR, 'chrono.log'), 'a') { |f| f.puts line }
+    ensure_state_dir
+    File.open(File.join(STATE_DIR, 'chrono.log'), 'a', 0o600) { |f| f.puts line }
   end
   ERRORS_SEEN << msg.sub(/\A!!! /, '') if io == $stderr
   begin
@@ -76,7 +98,11 @@ end
 def notify_box(title, text)
   return notify_mac(title, text) if ChronoConfig.mac?
   return notify_linux(title, text) unless Gem.win_platform?
-  require 'fiddle'
+  begin
+    require 'fiddle'
+  rescue LoadError
+    return nil # (no pop-up without Fiddle; chrono.log still has the details)
+  end
   box = Fiddle::Function.new(Fiddle.dlopen('user32')['MessageBoxW'],
                              [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT],
                              Fiddle::TYPE_INT)
@@ -178,19 +204,74 @@ def read_status(name)
   end
 end
 
-# Asks Windows directly whether a process is running and is Ruby (Lich).
-# Avoids shelling out to tasklist, which flashes a console window when run from the GUI.
+# Asks Windows directly whether a process is running and is Ruby (Lich), when it started, and
+# its command line. Avoids shelling out to tasklist, which flashes a console window when run from
+# the GUI. (Without Fiddle, which some Rubies lack, pid_alive? falls back to tasklist.)
+begin
+  require 'fiddle' if Gem.win_platform?
+rescue LoadError
+  nil
+end
+
 module WinProc
-  require 'fiddle'
   K32 = Fiddle.dlopen('kernel32')
   VP = Fiddle::TYPE_VOIDP
   IN = Fiddle::TYPE_INT
   OpenProcess        = Fiddle::Function.new(K32['OpenProcess'], [IN, IN, IN], VP)
   GetExitCodeProcess = Fiddle::Function.new(K32['GetExitCodeProcess'], [VP, VP], IN)
   QueryImageName     = Fiddle::Function.new(K32['QueryFullProcessImageNameW'], [VP, IN, VP, VP], IN)
+  GetProcessTimes    = Fiddle::Function.new(K32['GetProcessTimes'], [VP, VP, VP, VP, VP], IN)
   CloseHandle        = Fiddle::Function.new(K32['CloseHandle'], [VP], IN)
   QUERY_LIMITED = 0x1000
   STILL_ACTIVE  = 259
+  FILETIME_UNIX_OFFSET = 11_644_473_600 # seconds from 1601 (Windows' clock start) to 1970
+  CMDLINE_INFO = 60 # ProcessCommandLineInformation (Windows 8.1 and newer)
+
+  def self.with_process(pid)
+    handle = OpenProcess.call(QUERY_LIMITED, 0, pid)
+    return nil if handle.null?
+    begin
+      yield handle
+    ensure
+      CloseHandle.call(handle)
+    end
+  end
+
+  # Unix time the process started, or nil.
+  def self.start_time(pid)
+    with_process(pid) do |handle|
+      times = Array.new(4) { Fiddle::Pointer.malloc(8, Fiddle::RUBY_FREE) }
+      next nil if GetProcessTimes.call(handle, *times).zero?
+      times[0][0, 8].unpack1('Q<') / 10_000_000 - FILETIME_UNIX_OFFSET
+    end
+  rescue StandardError
+    nil
+  end
+
+  # The process's command line, or nil if Windows won't say.
+  def self.command_line(pid)
+    @nt_query ||= Fiddle::Function.new(Fiddle.dlopen('ntdll')['NtQueryInformationProcess'], [VP, IN, VP, IN, VP], IN)
+    with_process(pid) do |handle|
+      need = Fiddle::Pointer.malloc(4, Fiddle::RUBY_FREE)
+      size = 4096
+      text = nil
+      2.times do
+        buf = Fiddle::Pointer.malloc(size, Fiddle::RUBY_FREE)
+        if @nt_query.call(handle, CMDLINE_INFO, buf, size, need).zero?
+          # a UNICODE_STRING: its length in bytes, then (after padding) a pointer into buf
+          bytes = buf[0, 2].unpack1('S<')
+          addr = buf[Fiddle::SIZEOF_VOIDP, Fiddle::SIZEOF_VOIDP].unpack1(Fiddle::SIZEOF_VOIDP == 8 ? 'Q<' : 'L<')
+          text = Fiddle::Pointer.new(addr)[0, bytes].force_encoding('UTF-16LE').encode('UTF-8') if bytes.positive? && addr.positive?
+          break
+        end
+        size = need[0, 4].unpack1('L<') + 16 # too small: Windows said how much it needs
+        break unless size.between?(17, 65_536)
+      end
+      text
+    end
+  rescue StandardError
+    nil
+  end
 
   def self.ruby_running?(pid)
     handle = OpenProcess.call(QUERY_LIMITED, 0, pid)
@@ -209,7 +290,7 @@ module WinProc
       CloseHandle.call(handle)
     end
   end
-end if Gem.win_platform?
+end if Gem.win_platform? && defined?(Fiddle)
 
 def pid_alive?(pid)
   return false unless pid.is_a?(Integer) && pid > 0
@@ -244,9 +325,79 @@ rescue SystemCallError
   false
 end
 
+# ---------- is this status file's Lich still the one running? ----------
+# A status file outlives a Lich that crashed, and the system may since have given its process ID
+# to something else (another character's Lich, or Chrono itself). So a status file's PID only
+# counts as that character's Lich if the process started before the helper wrote the file
+# ('since': the helper runs inside Lich, so Lich always starts first).
+
+# Unix time a process started, or nil if it can't be told.
+def process_start_time(pid)
+  return WinProc.start_time(pid) if defined?(WinProc)
+  return nil if Gem.win_platform?
+
+  if ChronoConfig.mac?
+    out = IO.popen({ 'LC_ALL' => 'C' }, ['ps', '-p', pid.to_s, '-o', 'lstart='], err: File::NULL, &:read).to_s.strip
+    return out.empty? ? nil : Time.strptime(out, '%a %b %e %H:%M:%S %Y').to_i
+  end
+  fields = File.read("/proc/#{pid}/stat").sub(/\A.*\)\s*/m, '').split # from field 3 (state) on
+  boot = File.read('/proc/stat')[/^btime (\d+)/, 1].to_i
+  boot + fields[19].to_i / Etc.sysconf(Etc::SC_CLK_TCK) # field 22: start time, in ticks after boot
+rescue StandardError
+  nil
+end
+
+# A process's command line as one string, or nil if it can't be told.
+def process_command_line(pid)
+  return WinProc.command_line(pid) if defined?(WinProc)
+  return nil if Gem.win_platform?
+  return IO.popen(['ps', '-p', pid.to_s, '-o', 'command='], err: File::NULL, &:read).to_s.strip.then { |s| s.empty? ? nil : s } if ChronoConfig.mac?
+
+  File.binread("/proc/#{pid}/cmdline").split("\0").join(' ')
+rescue StandardError
+  nil
+end
+
+START_SLACK = 2 # seconds of rounding between the system's start time and the helper's clock
+
+# The process started no later than the helper's status file says it did (true if unknown).
+def started_in_time?(st)
+  since = st['since'].to_i
+  return true if since.zero?
+  started = process_start_time(st['pid'].to_i)
+  started.nil? || started <= since + START_SLACK
+end
+
+# The character's Lich is running: the PID is alive, is Ruby, and isn't a reused one.
+def lich_alive?(st)
+  st && pid_alive?(st['pid']) && started_in_time?(st)
+end
+
+# Stricter, before force-closing a process: it must be shown to be this character's Lich.
+# Returns nil if it is, or the reason it can't be confirmed.
+def not_lich_of(name, st)
+  pid = st['pid'].to_i
+  return "the process ID #{pid} isn't a running Ruby" unless pid_alive?(pid)
+  started = process_start_time(pid)
+  since = st['since'].to_i
+  if started && since.positive? && started > since + START_SLACK
+    return "process #{pid} started after #{name}'s Lich did (#{Time.at(started)} vs #{Time.at(since)}), so it's something else using a reused process ID"
+  end
+  cmd = process_command_line(pid)
+  if cmd
+    return "process #{pid} isn't Lich (#{cmd[0, 120]})" unless cmd.include?('lich.rbw')
+    unless cmd.match?(/--login[= ]+#{Regexp.escape(name)}(\s|\z)/i)
+      return "process #{pid} is Lich, but not #{name}'s (#{cmd[/--login[= ]+\S+/] || 'no --login'})"
+    end
+  elsif started.nil? || since.zero?
+    return "Chrono couldn't confirm that process #{pid} is #{name}'s Lich"
+  end
+  nil
+end
+
 def online?(name)
   st = read_status(name)
-  st && st['state'] != 'offline' && pid_alive?(st['pid'])
+  st && st['state'] != 'offline' && lich_alive?(st)
 end
 
 def heartbeat_age(st)
@@ -297,7 +448,10 @@ def cmd_list
   end
 end
 
-# ---------- saved-login commands (passwords are typed at a prompt, never on the command line) ----------
+# ---------- saved-login commands ----------
+# Passwords are typed at a prompt, never on Chrono's command line. Chrono hands them to Lich on
+# standard input (Lich 5.25.0 and newer). Older Lich only takes a password on its own command
+# line, where other programs on this PC can see it for the second or two Lich runs.
 
 def ask_password(prompt)
   require 'io/console'
@@ -372,7 +526,7 @@ def cmd_status
   puts format('%-16s %-14s %-8s %-8s %s', 'Character', 'State', 'PID', 'Process', 'Heartbeat')
   files.sort.each do |f|
     st = JSON.parse(File.read(f))
-    alive = pid_alive?(st['pid'])
+    alive = lich_alive?(st)
     beat = alive ? "#{heartbeat_age(st)}s ago" : '-'
     puts format('%-16s %-14s %-8s %-8s %s', st['name'], st['state'], st['pid'], alive ? 'running' : 'gone', beat)
     puts "    #{st['detail']}" if st['detail']
@@ -543,7 +697,7 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   fail! "lich.rbw not found at #{File.join(LICH_DIR, 'lich.rbw')}." unless File.exist?(File.join(LICH_DIR, 'lich.rbw'))
   ensure_helper!
   check_account_conflicts(entries, selected)
-  FileUtils.mkdir_p(STATE_DIR)
+  ensure_state_dir
 
   # All characters log in at the same time, like ticking several in Lich's login window:
   # each Lich is started a few seconds after the previous one (so they don't all hit
@@ -597,7 +751,7 @@ end
 def request_logout(name)
   st = read_status(name)
   fail! "no status. It wasn't started by Chrono, or the helper never ran." unless st
-  fail! "Lich process (PID #{st['pid']}) isn't running. Last known state: #{st['state']}." unless pid_alive?(st['pid'])
+  fail! "Lich process (PID #{st['pid']}) isn't running. Last known state: #{st['state']}." unless lich_alive?(st)
   unless %w[online logout_failed].include?(st['state'])
     fail! "state is '#{st['state']}', not online. If the helper was stopped, restart it with ;#{HELPER} in that character's window."
   end
@@ -637,7 +791,7 @@ def cmd_logout(specs, timeout, skip_offline: false)
   until pending.empty? || Time.now > deadline
     pending.dup.each do |name, info|
       err = nil
-      if !pid_alive?(info[:st]['pid'])
+      if !lich_alive?(info[:st])
         log "LOGOUT #{name}: logged out"
         WarlockWindow.close_after_logout(name, info[:st]['pid'])
       elsif (cur = read_status(name)) && cur['state'] == 'logout_failed' && !File.exist?(cmd_path(name))
@@ -666,7 +820,12 @@ def cmd_kill(name)
   name = name.split(':', 2).first.capitalize
   st = read_status(name)
   fail! "No status for #{name}." unless st
+  fail! "#{name} isn't online (its last state was '#{st['state']}')." if st['state'] == 'offline'
   fail! "#{name}'s Lich process (PID #{st['pid']}) isn't running." unless pid_alive?(st['pid'])
+  if (why = not_lich_of(name, st))
+    fail! "Not force-closing: #{why}. #{name}'s Lich has probably already exited. " \
+          'If a game window is still stuck, close it yourself.'
+  end
   log "KILL   #{name}: force-closing Lich PID #{st['pid']} and its frontend. The character may stay linkdead in game."
   if Gem.win_platform?
     ok = system('taskkill', '/PID', st['pid'].to_s, '/T', '/F')
@@ -757,6 +916,18 @@ def cmd_remove_tasks
   true
 end
 
+# Uninstalling, when the player also wants Chrono's data gone: Lich5/data/chrono (schedules,
+# rewards settings and history, the log, and Chrono's backups of Lich's saved logins) and the
+# in-game helper script. Lich's saved logins themselves are Lich's, and aren't touched.
+def cmd_remove_data
+  return (puts('No Lich folder set, so there is no Chrono data to remove.') || true) unless LICH_DIR
+  FileUtils.rm_rf(STATE_DIR)
+  helper = File.join(SCRIPT_DIR, "#{HELPER}.lic")
+  File.delete(helper) if File.exist?(helper)
+  puts "Deleted #{ChronoConfig.disp(STATE_DIR)} and the in-game helper."
+  true
+end
+
 # ---------- rewards commands ----------
 
 def cmd_run_rewards(accounts)
@@ -803,7 +974,7 @@ end
 def cmd_exact_setup
   gh = Rewards.github_state
   fail! 'Set up GitHub first: chrono github-setup' unless gh && gh['repo'] && !gh['stopped']
-  if Rewards.exact_state && Rewards.exact_needs_update
+  if Rewards.exact_state && Rewards.exact_needs_update && !Rewards.exact_token_expiring?
     key = ask_password('cron-job.org API key (cron-job.org > Settings > API): ')
     Rewards.exact_update_time!(key)
     puts "cron-job.org now starts the run at #{Rewards.load['time']}."
@@ -857,10 +1028,12 @@ def cmd_github_setup
   fail! 'No accounts are set to claim on GitHub. Use: chrono rewards-set ACCOUNT where github' if wanted.empty?
   puts "This stores the Simutronics logins for #{wanted.map { |a| a[:name] }.join(', ')} as encrypted secrets"
   puts 'in a private repository on your GitHub account, and claims rewards there every day.'
+  puts ChronoGitHub::ACTION_NOTICE
   token = github_sign_in_cli
   Rewards.github_sync!(token, progress: ->(line) { puts "  #{line}" })
   gh = Rewards.github_state
   puts "Done. Watch the first run at #{ChronoGitHub.actions_url(gh['repo'])}"
+  puts "Chrono doesn't keep the GitHub sign-in. To withdraw its access: #{ChronoGitHub::REVOKE_URL}"
   true
 end
 
@@ -910,7 +1083,7 @@ def cmd_rewards_set(args)
   true
 end
 
-QUICK_STAY = (ENV['CHRONO_QUICK_STAY'] || 45).to_i # seconds a quick (no logout time) scheduled login stays in once the game confirms it
+QUICK_STAY = (ChronoConfig.dev_env('CHRONO_QUICK_STAY') || 45).to_i # seconds a quick (no logout time) scheduled login stays in once the game confirms it (override: testing only)
 
 # launchd (Mac) runs a missed timed job as soon as the Mac wakes. Right for rewards, wrong for
 # a login: so a scheduled login or logout more than LATE_LIMIT minutes after its time is skipped.
@@ -984,7 +1157,7 @@ def migrate_from_lichsched!
   end
   still_online = Dir.glob(File.join(LEGACY_STATE_DIR, '*.status.json')).filter_map do |f|
     st = (JSON.parse(File.read(f)) rescue nil)
-    st && st['state'] != 'offline' && pid_alive?(st['pid']) ? st['name'] : nil
+    st && st['state'] != 'offline' && lich_alive?(st) ? st['name'] : nil
   end
   unless still_online.empty?
     log "Not carrying over lichsched's data yet: #{still_online.join(', ')} still online under lichsched. " \
@@ -992,7 +1165,7 @@ def migrate_from_lichsched!
     return still_online
   end
 
-  FileUtils.mkdir_p(STATE_DIR)
+  ensure_state_dir
   # Schedules: take lichsched's unless Chrono already has its own.
   old_sched = File.join(LEGACY_STATE_DIR, 'schedules.json')
   new_sched = File.join(STATE_DIR, 'schedules.json')
@@ -1071,8 +1244,7 @@ end
 
 begin
   # Started by Task Scheduler under rubyw there is no console; printing would fail.
-  if Gem.win_platform?
-    require 'fiddle'
+  if Gem.win_platform? && defined?(Fiddle)
     get_std = Fiddle::Function.new(Fiddle.dlopen('kernel32')['GetStdHandle'], [Fiddle::TYPE_INT], Fiddle::TYPE_VOIDP)
     { -11 => $stdout, -12 => $stderr }.each do |id, io|
       handle = get_std.call(id).to_i
@@ -1086,13 +1258,14 @@ begin
     puts parser
     exit 2
   end
-  require_lich_dir! unless %w[config set-lich-dir rebuild-tasks remove-tasks].include?(command)
-  waiting = LICH_DIR && !%w[config set-lich-dir remove-tasks].include?(command) ? migrate_from_lichsched! : []
+  require_lich_dir! unless %w[config set-lich-dir rebuild-tasks remove-tasks remove-data].include?(command)
+  waiting = LICH_DIR && !%w[config set-lich-dir remove-tasks remove-data].include?(command) ? migrate_from_lichsched! : []
   ok =
     case command
     when 'config'        then cmd_config
     when 'rebuild-tasks' then cmd_rebuild_tasks
     when 'remove-tasks'  then cmd_remove_tasks
+    when 'remove-data'   then cmd_remove_data
     when 'set-lich-dir' then cmd_set_lich_dir(names.first)
     when 'run-rewards'     then cmd_run_rewards(names)
     when 'github-setup'    then cmd_github_setup
@@ -1131,7 +1304,7 @@ begin
   exit(ok ? 0 : 1)
 rescue Errno::EPIPE
   exit 0 # output was cut short (e.g. piped into head); nothing went wrong
-rescue Fail, ChronoEAccess::Error, ChronoGitHub::Error, OptionParser::ParseError => e
+rescue Fail, ChronoEAccess::Error, ChronoGitHub::Error, ChronoCronJob::Error, ChronoUpdate::Error, OptionParser::ParseError => e
   log "!!! ERROR: #{e.message}", $stderr
   notify_failure.call(friendly_task.call)
   exit 1

@@ -37,6 +37,17 @@ while [ $# -gt 0 ]; do
 done
 
 say()  { printf '%s\n' "$*"; }
+# Quoting for what this writes into other files:
+#   sq      a word for sh (the "chrono" command, Chrono.app's launcher)
+#   desk_q  an argument in a .desktop file's Exec= (inside "..."; see the freedesktop.org spec)
+#   desk_v  a plain .desktop value (Path=, Icon=)
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+desk_q() {
+  local s="$1"
+  s="${s//\\/\\\\\\\\}"; s="${s//\"/\\\\\"}"; s="${s//\`/\\\\\`}"; s="${s//\$/\\\\\$}"; s="${s//%/%%}"
+  printf '"%s"' "$s"
+}
+desk_v() { local s="$1"; printf '%s' "${s//\\/\\\\}"; }
 fail() { printf '\nERROR: %s\n\nSetup did not finish.\n' "$*" >&2; exit 1; }
 ask()  { # ask "question" -> 0 for yes (default), 1 for no
   [ "$ASSUME_YES" = 1 ] && return 0
@@ -141,18 +152,25 @@ if [ -d "$OLD_APP" ]; then
   if grep -q 'lichsched.rb' "$BIN/lichsched" 2>/dev/null; then rm -f "$BIN/lichsched"; fi
 fi
 
+case "$RUBY$APP" in *$'\n'*|*$'\r'*) fail "The Ruby or install folder path has a line break in it, which Chrono can't use." ;; esac
+
 # ---- copy files (chrono_config.json, your saved Lich folder, is kept) ----
 for f in "${FILES[@]}"; do install -m 644 "$SRC/$f" "$APP/$f"; done
 chmod 755 "$APP/uninstall.sh"
 printf '%s\n' "$RUBY" > "$APP/ruby_path"
 
-# ---- "chrono" command ----
+# ---- "chrono" command (only if that name is free, or already Chrono's) ----
+if [ -e "$BIN/chrono" ] && ! grep -q 'chrono.rb' "$BIN/chrono" 2>/dev/null; then
+  say " NOTE: $BIN/chrono already exists and isn't Chrono's, so it was left alone."
+  say "       The command-line version is: $(sq "$RUBY") $(sq "$APP/chrono.rb")"
+else
 cat > "$BIN/chrono" <<EOF
 #!/bin/sh
 # Made by the Chrono installer. Runs chrono.rb with the Ruby that runs Lich.
-exec "$RUBY" "$APP/chrono.rb" "\$@"
+exec $(sq "$RUBY") $(sq "$APP/chrono.rb") "\$@"
 EOF
 chmod 755 "$BIN/chrono"
+fi
 
 if [ "$IS_MAC" = 1 ]; then
 # ---- Mac: Chrono.app in the Applications folder (a small app that starts Chrono) ----
@@ -161,13 +179,17 @@ for old_app in "/Applications/Chrono.app" "$HOME/Applications/Chrono.app"; do
   [ "$old_app" = "$MAC_APP" ] && continue
   [ -x "$old_app/Contents/MacOS/Chrono" ] && grep -q 'chrono_gui.rbw' "$old_app/Contents/MacOS/Chrono" 2>/dev/null && rm -rf "$old_app"
 done
-rm -rf "$MAC_APP"
+if [ -e "$MAC_APP" ]; then
+  grep -q 'chrono_gui.rbw' "$MAC_APP/Contents/MacOS/Chrono" 2>/dev/null || \
+    fail "$MAC_APP already exists and isn't Chrono's, so it wasn't replaced. Rename or move it, then run install.sh again."
+  rm -rf "$MAC_APP"
+fi
 mkdir -p "$MAC_APP/Contents/MacOS" "$MAC_APP/Contents/Resources"
 cat > "$MAC_APP/Contents/MacOS/Chrono" <<EOF
 #!/bin/sh
 # Made by the Chrono installer. Starts Chrono with the Ruby that runs Lich.
 export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
-cd "$APP" && exec "$RUBY" "$APP/chrono_gui.rbw" "\$@"
+cd $(sq "$APP") && exec $(sq "$RUBY") $(sq "$APP/chrono_gui.rbw") "\$@"
 EOF
 printf '%s\n' "$MAC_APP" > "$APP/mac_app"   # where it is, for open-at-sign-in and updates
 chmod 755 "$MAC_APP/Contents/MacOS/Chrono"
@@ -203,9 +225,9 @@ Type=Application
 Name=Chrono
 GenericName=Lich login scheduler
 Comment=Log GemStone IV characters in and out through Lich5, by hand or on a schedule
-Exec="$RUBY" "$APP/chrono_gui.rbw"
-Path=$APP
-Icon=$APP/chrono.png
+Exec=$(desk_q "$RUBY") $(desk_q "$APP/chrono_gui.rbw")
+Path=$(desk_v "$APP")
+Icon=$(desk_v "$APP/chrono.png")
 StartupWMClass=chrono
 Terminal=false
 Categories=Game;Utility;

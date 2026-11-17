@@ -34,7 +34,21 @@ end
 $LOAD_PATH.unshift File.join(lich_dir, 'lib')
 require 'json'
 require 'yaml'
-require File.join(lich_dir, 'lib', 'common', 'authentication', 'entry_store')
+store = File.join(lich_dir, 'lib', 'common', 'authentication', 'entry_store.rb')
+# Chrono uses this part of Lich directly, so a Lich that has changed it is reported plainly
+# rather than failing in some odd way.
+unsupported = lambda do |why|
+  ver = (File.read(File.join(lich_dir, 'lib', 'version.rb'))[/LICH_VERSION\s*=\s*['"]([^'"]+)/, 1] rescue nil)
+  $stderr.puts "LICH-LOG error: This Lich (#{ver || 'unknown version'}) has no saved-login code Chrono knows how to use (#{why}). " \
+               'Check for a Chrono update.'
+  exit 3
+end
+unsupported.call('lib/common/authentication/entry_store.rb is missing') unless File.exist?(store)
+require store
+unless defined?(Lich::Common::Authentication::EntryStore) &&
+       Lich::Common::Authentication::EntryStore.respond_to?(:load_saved_entries)
+  unsupported.call('EntryStore.load_saved_entries is missing')
+end
 
 entries = Lich::Common::Authentication::EntryStore.load_saved_entries(DATA_DIR, false)
 result_out.write("CHRONO-PASSWORDS-BEGIN\n")

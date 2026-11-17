@@ -27,7 +27,13 @@ Chrono runs on your computer and has no server of its own. It collects nothing, 
 
 - **GitHub update check:** when Chrono opens, it asks GitHub for the newest Chrono release. Nothing about you is sent. You can turn this off on the Settings tab.
 
-Passwords are never shown, logged, or written anywhere other than Lich's own saved-login file. Before changing that file, Chrono keeps a backup in `Lich5/data/chrono/backups`.
+- **simu-rewards** (only with "Claim on GitHub"): elanthia-online's [simu-rewards](https://github.com/elanthia-online/simu-rewards) action does the claim on GitHub and receives the passwords while it runs. Chrono pins it to one reviewed commit.
+
+Passwords are never shown, logged, or written anywhere other than Lich's own saved-login file. Before changing that file, Chrono keeps a backup in `Lich5/data/chrono/backups` (older backups are deleted after a password change). With Lich 5.25.0 or newer, Chrono gives Lich passwords on standard input, never on a command line. Chrono only sends a password to Simutronics' login service after checking that its certificate is the one Lich saved.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) to report a problem privately, and for how releases and updates are protected.
 
 ## Code signing policy
 
@@ -35,7 +41,9 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 - The Windows installer is built from this repository's source by GitHub Actions ([release.yml](.github/workflows/release.yml)), then signed through SignPath. Every signing request is approved by hand.
 - In Windows, the signature shows the signer as **SignPath Foundation**. To check it, right-click the installer, choose Properties, then Digital Signatures.
-- The `.rb` files in the zip and Linux downloads are plain-text Ruby scripts and can't carry a signature. Each release lists SHA-256 checksums of its files in `SHA256SUMS.txt`.
+- The `.rb` files in the zip, Linux and Mac downloads are plain-text Ruby scripts and can't carry a signature. Each release lists SHA-256 checksums of its files in `SHA256SUMS.txt`, signed with Chrono's release key (`SHA256SUMS.txt.sig`; the public key is [release-signing.pub](release-signing.pub)). Chrono's updater checks that signature before installing anything.
+- Every release also has build provenance from GitHub (`gh attestation verify FILE --repo jmbreitfeld/Chrono4Lich`).
+- A release that went out before SignPath signing was set up says so in its release notes.
 
 **Team roles**
 

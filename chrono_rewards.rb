@@ -21,7 +21,7 @@ module Rewards
   FILE      = STATE_DIR && File.join(STATE_DIR, 'rewards.json')
   HISTORY   = STATE_DIR && File.join(STATE_DIR, 'rewards_history.json')
   HISTORY_KEEP = 3000 # entries (years of daily runs for a few accounts)
-  STORE     = ENV['CHRONO_STORE_URL'] || 'https://store.play.net' # override for testing only
+  STORE     = ChronoConfig.dev_env('CHRONO_STORE_URL') || 'https://store.play.net' # (testing only)
   SIGN_IN   = '/Account/SignIn?returnURL=%2Fstore%2Fpurchase%2Fgs'
   CLAIM     = '/Store/ClaimReward'
   DAILY_GAME = 'GS3' # daily login rewards: GemStone Prime characters
@@ -51,7 +51,7 @@ module Rewards
   end
 
   def save(data)
-    FileUtils.mkdir_p(STATE_DIR)
+    ensure_state_dir
     tmp = "#{FILE}.tmp"
     File.write(tmp, JSON.pretty_generate(data))
     File.rename(tmp, FILE)
@@ -106,6 +106,9 @@ module Rewards
     return wanted.empty? ? nil : 'not set up yet' unless gh && !gh['stopped']
     return 'a saved password changed since it was set up' if gh['stale']
     return 'accounts, the time or exact timing changed since it was set up' if gh['signature'] != github_signature(data)
+    if defined?(ChronoGitHub::ACTION) && gh['action'] != ChronoGitHub::ACTION
+      return 'this version of Chrono uses a newer, pinned version of the rewards action'
+    end
     nil
   end
 
@@ -113,7 +116,8 @@ module Rewards
     data = load
     data['github'] = { 'repo' => result[:repo], 'login' => result[:login], 'accounts' => result[:accounts],
                        'time' => result[:time], 'cron' => result[:cron], 'branch' => result[:branch], 'at' => Time.now.to_i,
-                       'signature' => github_signature(data), 'stale' => false }
+                       'signature' => github_signature(data), 'stale' => false,
+                       'action' => (ChronoGitHub::ACTION if defined?(ChronoGitHub::ACTION)) }
     save(data)
   end
 
@@ -122,12 +126,23 @@ module Rewards
   # nil when off; otherwise {'job_id', 'time', 'tz', 'repo', 'at'}
   def exact_state(data = load) = data['exact']
 
-  # Why the cron-job.org job needs updating (only its time can drift), or nil.
+  # Why the cron-job.org job needs updating, or nil: the claim time changed, or the GitHub token it
+  # uses expires within a month (then it's set up again with a new token).
   def exact_needs_update(data = load)
     ex = exact_state(data)
     return nil unless ex
+    if exact_token_expiring?(data)
+      at = Time.at(ex['token_expires'])
+      return "the GitHub token it uses #{at < Time.now ? 'expired' : 'expires'} on #{at.strftime('%b %-d, %Y')}; " \
+             'set exact timing up again with a new token'
+    end
     return 'the claim time changed' if ex['time'] != data['time']
     nil
+  end
+
+  def exact_token_expiring?(data = load)
+    exp = exact_state(data)&.dig('token_expires').to_i
+    exp.positive? && exp - Time.now.to_i < ChronoGitHub::TOKEN_WARN_DAYS * 86_400
   end
 
   # Time zone name for cron-job.org, and the time to give it. Without a known zone name, UTC
@@ -149,14 +164,16 @@ module Rewards
     gh = github_state(data)
     fail! 'Set up GitHub first (Claim on GitHub, then "Set up GitHub...").' unless gh && gh['repo'] && !gh['stopped']
     progress.call('Checking the GitHub token...')
-    ChronoGitHub.check_run_token(token, gh['repo'])
+    expires = ChronoGitHub.check_run_token(token, gh['repo'])
     progress.call("The token can start runs in #{gh['repo']} (no run was started).")
     tz, at = exact_zone(data['time'])
     progress.call('Setting up the daily job on cron-job.org...')
     id = ChronoCronJob.setup!(key, gh['repo'], gh['branch'] || 'main', token, at, tz)
     progress.call("cron-job.org will start the run every day at #{at} (#{tz}).")
     data = load
-    data['exact'] = { 'job_id' => id, 'time' => data['time'], 'tz' => tz, 'repo' => gh['repo'], 'at' => Time.now.to_i }
+    data['exact'] = { 'job_id' => id, 'time' => data['time'], 'tz' => tz, 'repo' => gh['repo'], 'at' => Time.now.to_i,
+                      'token_expires' => expires&.to_i }
+    progress.call("The token expires #{expires.strftime('%b %-d, %Y')}; Chrono will remind you a month before.") if expires
     save(data)
     log "EXACT set up cron-job.org job #{id} for #{gh['repo']} at #{at} #{tz}"
     id
@@ -325,7 +342,9 @@ module Rewards
     # What Lich itself printed (its own messages; never the passwords, which only appear
     # between the markers on standard output). Used to explain failures.
     out = out.b.force_encoding(Encoding::UTF_8)
-    said = (err + out.sub(/CHRONO-PASSWORDS-BEGIN.*CHRONO-PASSWORDS-END/m, ''))
+    # Everything from the begin marker on is cut off, even without an end marker (the helper
+    # may have stopped partway through the passwords).
+    said = (err + out.sub(/CHRONO-PASSWORDS-BEGIN.*\z/m, ''))
            .force_encoding(Encoding::UTF_8).scrub
            .lines.map(&:strip).reject(&:empty?).reject { |l| l.start_with?('from ') }
            .map { |l| l =~ /\A\S+:\d+:in [^:]*:\s*(.+?)(?: \(([\w:]+)\))?\z/ ? "#{Regexp.last_match(1)}#{Regexp.last_match(2) ? " (#{Regexp.last_match(2)})" : ''}" : l }
@@ -458,7 +477,7 @@ module Rewards
 
   # ---------- daily login rewards ----------
 
-  def game_host_override = ENV['CHRONO_GAME_HOST'] # testing only
+  def game_host_override = ChronoConfig.dev_env('CHRONO_GAME_HOST') # (testing only)
 
   # Enters the game with a one-time key, waits for the login reward (or the game prompt if it
   # was already claimed today), then quits. Returns the reward text or 'already claimed today'.

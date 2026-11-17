@@ -12,6 +12,8 @@
 
 require 'yaml'
 require 'open3'
+require 'securerandom'
+require 'fileutils'
 
 module SavedLogins
   GAME_NAMES = { 'GS3' => 'GemStone IV', 'GSX' => 'GemStone IV Platinum',
@@ -97,7 +99,7 @@ module SavedLogins
       user32 = Fiddle.dlopen('user32')
       spi = Fiddle::Function.new(user32['SystemParametersInfoW'],
                                  [Fiddle::TYPE_UINT, Fiddle::TYPE_UINT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_UINT], Fiddle::TYPE_INT)
-      rect = Fiddle::Pointer.malloc(16)
+      rect = Fiddle::Pointer.malloc(16, Fiddle::RUBY_FREE)
       return nil if spi.call(0x30, 0, rect, 0).zero? # SPI_GETWORKAREA
 
       l, t, r, b = rect[0, 16].unpack('l4')
@@ -109,7 +111,7 @@ module SavedLogins
       wa = mon&.workarea
       wa && [wa.x, wa.y, wa.width, wa.height]
     end
-  rescue StandardError, LoadError, Fiddle::DLError
+  rescue StandardError, LoadError
     nil
   end
 
@@ -216,19 +218,44 @@ module SavedLogins
 
   # ---------- backups and writing ----------
 
+  def backup_dir = File.join(STATE_DIR, 'backups')
+
+  # Backups hold passwords, so only the player's own account can read them (on Linux and Mac).
   def backup!(file)
     return unless File.exist?(file)
-    dir = File.join(STATE_DIR, 'backups')
-    FileUtils.mkdir_p(dir)
-    FileUtils.cp(file, File.join(dir, "#{File.basename(file)}.#{Time.now.strftime('%Y%m%d-%H%M%S-%L')}"))
-    old = Dir.glob(File.join(dir, "#{File.basename(file)}.*")).sort
+    ensure_state_dir
+    FileUtils.mkdir_p(backup_dir, mode: 0o700)
+    FileUtils.install(file, File.join(backup_dir, "#{File.basename(file)}.#{Time.now.strftime('%Y%m%d-%H%M%S-%L')}"), mode: 0o600)
+    old = Dir.glob(File.join(backup_dir, "#{File.basename(file)}.*")).sort
     old.first([old.size - KEEP_BACKUPS, 0].max).each { |f| File.delete(f) }
   end
 
+  # After a password change or removing an account, older backups still hold the old password
+  # (or the removed account's), so they're deleted; a backup of the file as it is now is kept.
+  def forget_old_backups!
+    [yaml_file, dat_file].each do |file|
+      Dir.glob(File.join(backup_dir, "#{File.basename(file)}.*")).each { |f| File.delete(f) }
+      backup!(file)
+    end
+  rescue SystemCallError => e
+    log "Couldn't delete older backups of the saved logins: #{e.message}"
+  end
+
+  # Replaces file with content in one step, keeping its permissions (Lich makes these files
+  # readable by the player only): a new, uniquely named file, written out fully, then swapped in.
   def write_atomically(file, content)
-    tmp = "#{file}.chrono-tmp"
-    File.binwrite(tmp, content)
+    mode = (File.stat(file).mode & 0o777 rescue 0o600)
+    tmp = "#{file}.chrono-#{SecureRandom.hex(4)}.tmp"
+    File.open(tmp, File::WRONLY | File::CREAT | File::EXCL | File::BINARY, mode) do |f|
+      f.write(content)
+      f.flush
+      f.fsync
+    end
+    File.chmod(mode, tmp) # (the umask may have trimmed it)
     File.rename(tmp, file)
+  rescue StandardError
+    File.delete(tmp) if tmp && File.exist?(tmp)
+    raise
   end
 
   def write_dat(list)
@@ -236,12 +263,31 @@ module SavedLogins
     write_atomically(dat_file, [Marshal.dump(list)].pack('m'))
   end
 
-  # Runs one of Lich's account commands. The password, if any, is passed as Lich expects it.
+  # Lich 5.25.0 and newer read the password from standard input with --password-stdin, which keeps
+  # it out of the command line (where other programs can see it while Lich runs). 5.26.0 stops
+  # accepting it on the command line at all. Older Lich only takes it on the command line.
+  STDIN_PASSWORD_LICH = Gem::Version.new('5.25.0')
+
+  def lich_password_stdin?
+    v = lich_version
+    return true if v && (Gem::Version.new(v) >= STDIN_PASSWORD_LICH rescue false)
+    # a development or pre-release Lich that already has it
+    src = File.read(File.join(LICH_DIR, 'lib', 'common', 'cli', 'cli_orchestration.rb')) rescue ''
+    src.include?('--password-stdin')
+  end
+
+  # Runs one of Lich's account commands. The password (secret:), when Lich supports it, is given
+  # on standard input with --password-stdin in its place; otherwise in its place on the command line.
   def run_lich(*args, secret: nil)
     fail! "This Lich has no command for changing saved logins (needs Lich 5.13 or newer; found #{lich_version || 'unknown'})." unless lich_has_cli?
     backup!(yaml_file)
+    stdin = ''
+    if secret && lich_password_stdin?
+      args = args.map { |a| a.equal?(secret) ? '--password-stdin' : a } # same place: Lich reads it as the flag
+      stdin = "#{secret}\n"
+    end
     cmd = [rubyw_path, File.join(LICH_DIR, 'lich.rbw'), *args]
-    out, status = Open3.capture2e(*cmd, chdir: LICH_DIR, stdin_data: '')
+    out, status = Open3.capture2e(*cmd, chdir: LICH_DIR, stdin_data: stdin)
     out = out.force_encoding(Encoding::UTF_8).scrub
     out = out.gsub(secret, '********') if secret && !secret.empty?
     [out.strip, status]
@@ -349,6 +395,7 @@ module SavedLogins
       hits.each { |e| e[:password] = password }
       write_dat(list)
     end
+    forget_old_backups!
     log "LOGINS changed the saved password for account #{account}"
     Rewards.github_password_changed(account) if defined?(Rewards)
   end
@@ -392,6 +439,7 @@ module SavedLogins
       fail! "Account #{account} isn't saved." if list.size == before
       write_dat(list)
     end
+    forget_old_backups!
     log "LOGINS removed account #{account} and its characters"
   end
 

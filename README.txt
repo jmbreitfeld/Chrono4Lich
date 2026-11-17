@@ -108,8 +108,12 @@ USING IT
 UPDATES
   When Chrono opens, it checks GitHub for a newer version. If there is one, a bar at the
   top offers:
-    Update now - downloads the update for this computer, checks it against the release's
-      SHA256SUMS.txt, closes Chrono and starts it. Windows: the setup .exe runs (its last
+    Update now - downloads the update for this computer and checks it: the release's list
+      of checksums (SHA256SUMS.txt) must carry the signature of Chrono's release key, the
+      download must match its checksum, and it must be the version offered (newer than
+      yours). On Windows a code-signed installer's signature must also be valid. Anything
+      else is refused and nothing runs. Then it closes Chrono and starts the update.
+      Downloads only come from GitHub, over https. Windows: the setup .exe runs (its last
       page can reopen Chrono). Linux: the new install.sh runs with the same Ruby, then
       Chrono reopens (if that fails: ~/.cache/chrono/Chrono4Lich-update/install.log).
       Characters stay logged in; settings and schedules are kept.
@@ -172,6 +176,12 @@ CLAIMING ON GITHUB (works while the computer is off)
     (encrypted on this computer; only GitHub can decrypt them, to run the claim), writes
     a daily workflow that uses simu-rewards, and starts a first run. "Open results on
     GitHub" shows how each run went.
+  - simu-rewards is a separate project (by elanthia-online, the Lich team) and receives
+    the passwords while it runs. Chrono uses one fixed, reviewed version of it, never
+    whatever happens to be newest; a Chrono update that moves to a newer version asks you
+    to update GitHub (the Rewards tab says NEEDS UPDATING).
+  - To withdraw Chrono's access to your GitHub account entirely:
+    https://github.com/settings/applications (Authorized OAuth Apps > Chrono4Lich > Revoke).
   - Each account claims either here or on GitHub, never both.
   - Chrono doesn't keep the GitHub sign-in. You sign in again only to change something.
     The Rewards tab says "NEEDS UPDATING" when that's needed: after changing which
@@ -197,7 +207,11 @@ EXACT TIMING FOR GITHUB (optional, free)
     page with everything filled in except one setting GitHub can't fill in: under
     "Repository access" choose "Only select repositories" and pick only
     chrono4lich-rewards, then "Generate token". That token can only start runs in that one
-    repository; it can't read your logins. Then on cron-job.org: Settings, create an API key.
+    repository; it can't read your logins, and it expires after a year. Then on
+    cron-job.org: Settings, create an API key.
+  - A month before the token expires, the Rewards tab says exact timing NEEDS UPDATING:
+    click "Exact timing...", make a new token the same way, and paste it with the API key
+    (the cron-job.org job is updated in place). Then delete the old token on GitHub.
   - Chrono uses the API key to create the job, then forgets it, and never keeps the token
     (it lives in the cron-job.org job). After changing the claim time, the Rewards tab says
     exact timing NEEDS UPDATING: click "Exact timing..." and paste the API key again.
@@ -247,12 +261,14 @@ COMING FROM LICHSCHED
 UNINSTALL
   Windows setup.exe: use "Add or remove programs" in Windows Settings, or
   "Uninstall Chrono" in the Start menu. This also removes the scheduled tasks.
-  Linux: run ~/.local/share/Chrono4Lich/uninstall.sh
+  Linux / Mac: run ~/.local/share/Chrono4Lich/uninstall.sh
   Windows zip: delete each schedule on the Schedules tab (this removes its tasks),
   then delete the Chrono4Lich folder and the desktop shortcut.
-  Your schedules stay saved in Lich's data folder, so if you reinstall, "Rebuild
-  scheduled tasks" brings them back. Optional cleanup: delete
-  Lich5/scripts/chrono_helper.lic and the folder Lich5/data/chrono.
+  The uninstaller asks whether to delete Chrono's data too (Lich5/data/chrono: schedules,
+  rewards settings and history, the log, and Chrono's backups of your saved logins). If
+  you keep it, reinstalling and clicking "Rebuild scheduled tasks" brings your schedules
+  back. (Windows zip: delete Lich5/data/chrono and Lich5/scripts/chrono_helper.lic
+  yourself if you won't reinstall.)
 
 PRIVACY AND PASSWORDS
   - Logging in and out: Chrono reads only character and account names. Lich itself
@@ -261,8 +277,15 @@ PRIVACY AND PASSWORDS
     Simutronics' own login service (eaccess.play.net, encrypted) to check it and list
     your characters, then saved into Lich's saved logins:
       newer Lich (entry.yaml): saved by Lich itself, with whatever password encryption
-        you chose in Lich;
+        you chose in Lich. Lich 5.25.0 and newer are given the password privately (on
+        standard input). Older Lich can only take it on its command line, where other
+        programs running on your computer could see it for the second or two Lich runs;
+        updating Lich avoids that.
       older Lich (entry.dat): saved the same way Lich and elogin save it.
+  - The login service: before sending anything, Chrono checks that the service's
+    certificate is exactly the one Lich saved (Lich5/data/simu.pem), so the password can't
+    go to an impostor. If Lich hasn't saved it yet, or it doesn't match, Chrono stops and
+    asks you to log in once with Lich (which saves or updates it).
   - Claiming rewards: Chrono reads each account's saved password (for encrypted
     entry.yaml, by asking Lich's own code to decrypt it), keeps it in memory for that
     run only, and sends it only to Simutronics: the SimuCoin store (store.play.net) and
@@ -278,7 +301,11 @@ PRIVACY AND PASSWORDS
   - Chrono never shows passwords, never writes them to its log, and never sends them
     anywhere except Simutronics.
   - Before changing your saved logins, Chrono backs them up to
-    Lich5/data/chrono/backups (the last 10 changes).
+    Lich5/data/chrono/backups (the last 10 changes). After a password change or removing
+    an account, older backups (which hold the old password) are deleted. On Linux and Mac
+    Chrono's folder (Lich5/data/chrono) can be opened only by your own user account.
+  - Found a security problem? Please report it privately: see SECURITY.md on
+    github.com/jmbreitfeld/Chrono4Lich (Security tab > Report a vulnerability).
 
 CREDITS
   Chrono is by Peggyanne. It was inspired by, and works alongside, other players' work:

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Removes Chrono (Linux or Mac): its schedule timers, menu entry, command and files.
-# Your schedules stay saved in Lich's data folder (data/chrono), so reinstalling and
-# clicking "Rebuild scheduled tasks" brings them back. Lich itself is not touched.
+# It asks whether to delete Chrono's data in Lich's folder (data/chrono: schedules, rewards
+# settings, the log, and Chrono's backups of Lich's saved logins) too. Kept, reinstalling and
+# clicking "Rebuild scheduled tasks" brings the schedules back. Lich itself is not touched.
 
 set -uo pipefail
 
@@ -12,12 +13,16 @@ DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 read -r -p "Uninstall Chrono? [y/N] " a || true
 case "$a" in [yY]*) ;; *) echo "Nothing changed."; exit 0 ;; esac
 
+read -r -p "Also delete Chrono's data (schedules, rewards settings, log, and its backups of your saved logins)? [y/N] " wipe || true
+
 RUBY="$(cat "$APP/ruby_path" 2>/dev/null || true)"
 if [ -n "$RUBY" ] && [ -x "$RUBY" ] && [ -f "$APP/chrono.rb" ]; then
   if ! "$RUBY" "$APP/chrono.rb" remove-tasks; then
     echo "WARNING: couldn't remove the schedule timers. Remove ~/.config/systemd/user/chrono-* by hand,"
     echo "         then run: systemctl --user daemon-reload  (Mac: ~/Library/LaunchAgents/net.chrono4lich.*)"
   fi
+  # (after remove-tasks, which reads the schedules from that data)
+  case "$wipe" in [yY]*) "$RUBY" "$APP/chrono.rb" remove-data || echo "WARNING: couldn't delete Chrono's data (data/chrono in your Lich folder)." ;; esac
 else
   echo "WARNING: Lich's Ruby wasn't found, so the schedule timers couldn't be removed."
   echo "         Remove ~/.config/systemd/user/chrono-* by hand, then run: systemctl --user daemon-reload"
@@ -39,4 +44,4 @@ for f in chrono.rb chrono_config.rb chrono_schedule.rb chrono_eaccess.rb chrono_
 done
 rmdir "$APP" 2>/dev/null || echo "Left $APP in place because it has other files in it."
 echo "Chrono is uninstalled."
-echo "Optional: delete scripts/chrono_helper.lic and data/chrono in your Lich folder."
+case "$wipe" in [yY]*) ;; *) echo "Your Chrono data is still in data/chrono in your Lich folder (delete it if you won't reinstall)." ;; esac

@@ -9,6 +9,7 @@ require 'json'
 require 'open3'
 require 'fileutils'
 require 'date'
+require 'tmpdir'
 
 module Schedules
   FILE        = STATE_DIR && File.join(STATE_DIR, 'schedules.json')
@@ -33,7 +34,7 @@ module Schedules
   end
 
   def save(list)
-    FileUtils.mkdir_p(STATE_DIR)
+    ensure_state_dir
     tmp = FILE + '.tmp'
     File.write(tmp, JSON.pretty_generate(list.sort_by { |s| s['name'].downcase }))
     File.rename(tmp, FILE)
@@ -42,6 +43,32 @@ module Schedules
   def find(name)
     load.find { |s| s['name'].casecmp?(name) } or fail! "No schedule named '#{name}'."
   end
+
+  # The checks that don't need Lich's saved logins. Run every time a schedule is installed (not
+  # only when it's saved from the window), since its values go into task, timer and plist files.
+  def check_fields!(s)
+    fail! 'A saved schedule is damaged (not a schedule).' unless s.is_a?(Hash)
+    fail! "The schedule name #{s['name'].to_s[0, 40].inspect} isn't allowed (letters, numbers, spaces, - and _; up to 40 characters)." unless s['name'].to_s.match?(NAME_RE)
+    days = s['days']
+    fail! "Schedule '#{s['name']}': its days are damaged." unless days.is_a?(Array) && !days.empty? && (days - DAYS).empty?
+    fail! "Schedule '#{s['name']}': login time #{s['login_at'].to_s[0, 10].inspect} isn't HH:MM." unless s['login_at'].to_s.match?(TIME_RE)
+    if s['logout_at'] && !s['logout_at'].to_s.match?(TIME_RE)
+      fail! "Schedule '#{s['name']}': logout time #{s['logout_at'].to_s[0, 10].inspect} isn't HH:MM."
+    end
+    chars = s['characters']
+    unless chars.is_a?(Array) && !chars.empty? && chars.all? { |c| c.is_a?(String) && c.match?(/\A[^\x00-\x1f\x7f]{1,80}\z/) }
+      fail! "Schedule '#{s['name']}': its characters are damaged."
+    end
+  end
+
+  # Every job written to a scheduler: times and days in the expected form only.
+  def check_job!(job)
+    fail! "A scheduled job's time #{job[:time].to_s[0, 10].inspect} isn't HH:MM." unless job[:time].to_s.match?(TIME_RE)
+    fail! "A scheduled job's days are damaged." unless job[:days].is_a?(Array) && (job[:days] - DAYS).empty?
+  end
+
+  # Text for task, timer and plist files: one line, no control characters.
+  def one_line(text) = text.to_s.gsub(/[\x00-\x1f\x7f]+/, ' ')
 
   def validate!(s, entries, others)
     fail! 'Give the schedule a name (letters, numbers, spaces, - and _; up to 40 characters).' unless s['name'].to_s.match?(NAME_RE)
@@ -86,6 +113,7 @@ module Schedules
   # ---------- which scheduler ----------
 
   def install!(s)
+    check_fields!(s)
     return win_install!(s) if Gem.win_platform?
     return mac_install!(s) if ChronoConfig.mac?
 
@@ -162,25 +190,27 @@ module Schedules
   end
 
   def service_unit(job)
+    check_job!(job)
     script = File.expand_path('chrono.rb', __dir__)
-    exec = [rubyw_path, script, *job[:args]].map { |a| sd_quote(a) }.join(' ')
+    exec = [rubyw_path, script, *job[:args]].map { |a| sd_quote(one_line(a)) }.join(' ')
     <<~UNIT
       [Unit]
-      Description=#{job[:description].gsub('%', '%%')}
+      Description=#{one_line(job[:description]).gsub('%', '%%')}
 
       [Service]
       Type=oneshot
-      WorkingDirectory=#{__dir__.gsub('%', '%%')}
+      WorkingDirectory=#{one_line(__dir__).gsub('%', '%%')}
       ExecStart=#{exec}
       TimeoutStartSec=12h
     UNIT
   end
 
   def timer_unit(base, job)
+    check_job!(job)
     day_list = DAYS.select { |d| job[:days].include?(d) }.map { |d| SYSTEMD_DAYS[d] }.join(',')
     <<~UNIT
       [Unit]
-      Description=#{job[:description].gsub('%', '%%')} (timer)
+      Description=#{one_line(job[:description]).gsub('%', '%%')} (timer)
 
       [Timer]
       OnCalendar=#{day_list} *-*-* #{job[:time]}:00
@@ -277,14 +307,13 @@ module Schedules
   end
 
   def create_task(tn, xml)
-    FileUtils.mkdir_p(STATE_DIR)
-    path = File.join(STATE_DIR, 'task.xml')
-    File.binwrite(path, "\uFEFF#{xml}".encode('UTF-16LE'))
-    out, status = schtasks('/Create', '/F', '/TN', tn, '/XML', path.tr('/', '\\'))
-    fail! "Windows refused to create the scheduled task '#{tn}':\n#{out}" unless status.success?
+    Dir.mktmpdir('chrono-task') do |dir| # a fresh private folder each time, removed afterwards
+      path = File.join(dir, 'task.xml')
+      File.binwrite(path, "\uFEFF#{xml}".encode('UTF-16LE'))
+      out, status = schtasks('/Create', '/F', '/TN', tn, '/XML', path.tr('/', '\\'))
+      fail! "Windows refused to create the scheduled task '#{tn}':\n#{out}" unless status.success?
+    end
     log "SCHEDULE task saved: #{tn}"
-  ensure
-    File.delete(path) if path && File.exist?(path)
   end
 
   def delete_task(tn)
@@ -295,7 +324,7 @@ module Schedules
   end
 
   def xml_escape(text)
-    text.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;').gsub('"', '&quot;')
+    one_line(text).gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;').gsub('"', '&quot;')
   end
 
   # Windows command-line quoting for one argument.
@@ -304,6 +333,7 @@ module Schedules
   end
 
   def task_xml(job)
+    check_job!(job)
     command = rubyw_path.tr('/', '\\')
     script  = File.expand_path('chrono.rb', __dir__).tr('/', '\\')
     args    = [%("#{script}"), *job[:args].map { |a| win_quote(a) }].join(' ')
@@ -374,7 +404,7 @@ module Schedules
   # A property list (Apple's XML settings format) from a Hash of strings, numbers,
   # true/false, arrays and hashes.
   def plist_xml(hash)
-    esc = ->(v) { v.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') }
+    esc = ->(v) { one_line(v).gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') }
     val = lambda do |v, ind|
       pad = '  ' * ind
       case v
@@ -398,6 +428,7 @@ module Schedules
   end
 
   def mac_job_plist(base, job)
+    check_job!(job)
     h, m = job[:time].split(':').map(&:to_i)
     script = File.expand_path('chrono.rb', __dir__)
     args = [RbConfig.ruby, script, *job[:args]]

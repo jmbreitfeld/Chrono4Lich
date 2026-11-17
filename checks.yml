@@ -1,0 +1,24 @@
+# Checks every push and pull request: Ruby syntax (with warnings), the test suite in test/,
+# and the shell scripts (shellcheck). Nothing here can publish anything.
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Ruby syntax
+        run: for f in *.rb *.rbw *.lic tools/*.rb test/*.rb; do ruby -wc "$f" >/dev/null || exit 1; done
+      - name: Tests
+        run: ruby test/run_tests.rb
+      - name: Shell scripts
+        run: shellcheck -S warning install.sh uninstall.sh build.sh

@@ -102,7 +102,7 @@ CLI_SCRIPT = File.join(__dir__, 'chrono.rb')
 def gui_log(msg)
   dir = defined?(STATE_DIR) && STATE_DIR ? STATE_DIR : ChronoConfig::APP_DIR
   FileUtils.mkdir_p(dir)
-  File.open(File.join(dir, 'chrono.log'), 'a') do |f|
+  File.open(File.join(dir, 'chrono.log'), 'a', 0o600) do |f|
     f.puts "#{Time.now.strftime('%Y-%m-%d %H:%M:%S')}  GUI: #{msg}"
   end
 rescue StandardError
@@ -127,9 +127,18 @@ module Autostart
     if ChronoConfig.windows?
       %("#{rubyw_path.tr('/', '\\')}" "#{gui_script.tr('/', '\\')}" --minimized)
     else
-      %("#{RbConfig.ruby}" "#{gui_script}" --minimized)
+      "#{desktop_arg(RbConfig.ruby)} #{desktop_arg(gui_script)} --minimized"
     end
   end
+
+  # One quoted argument for a .desktop file's Exec= line (freedesktop.org's rules: inside "...",
+  # \ " ` $ take a backslash, which the file format then doubles; % is written %%).
+  def desktop_arg(s)
+    raise ArgumentError, 'path has a line break' if s.match?(/[\r\n]/)
+    %("#{s.gsub(/[\\"`$]/) { |c| c == '\\' ? '\\\\\\\\' : "\\\\#{c}" }.gsub('%', '%%')}")
+  end
+
+  def desktop_value(s) = s.gsub('\\', '\\\\\\\\')
 
   # Mac: a launchd agent that opens Chrono when you sign in.
   def mac_file = File.join(Dir.home, 'Library', 'LaunchAgents', 'net.chrono4lich.autostart.plist')
@@ -169,8 +178,8 @@ module Autostart
         Name=Chrono
         Comment=Opens Chrono (minimized) when you sign in
         Exec=#{command}
-        Path=#{ChronoConfig::APP_DIR}
-        Icon=#{File.join(ChronoConfig::APP_DIR, 'chrono.png')}
+        Path=#{desktop_value(ChronoConfig::APP_DIR)}
+        Icon=#{desktop_value(File.join(ChronoConfig::APP_DIR, 'chrono.png'))}
         Terminal=false
         X-GNOME-Autostart-enabled=true
       DESKTOP
@@ -220,7 +229,7 @@ module GuiPrefs
     return if data[key] == value
 
     data[key] = value
-    FileUtils.mkdir_p(STATE_DIR)
+    ensure_state_dir
     tmp = "#{file}.tmp"
     File.write(tmp, JSON.pretty_generate(data))
     File.rename(tmp, file)
@@ -351,7 +360,7 @@ class ChronoWindow
     in_background("Downloading Chrono #{rel[:version]}...",
                   done: lambda { |path|
                     safely do
-                      ChronoUpdate.start!(path)
+                      ChronoUpdate.start!(path, version: rel[:version])
                       append_log("Starting the update to Chrono #{rel[:version]}. Chrono will close now.")
                       remember_window_size
                       GLib::Timeout.add(800) { Gtk.main_quit; false }
@@ -925,7 +934,12 @@ class ChronoWindow
       github_dialog(:sync, confirm: false) if Rewards.github_needs_update
     end
 
-    if ex && Rewards.exact_needs_update(data)
+    if ex && Rewards.exact_token_expiring?(data)
+      info_dialog("The GitHub token cron-job.org uses to start the run #{Rewards.exact_needs_update(data).sub(/\Athe GitHub token it uses /, '').sub(/; set.*/, '')}.\n\n" \
+                  'Make a new one and set exact timing up again; the cron-job.org job is updated in place. ' \
+                  'Afterwards, delete the old "Chrono4Lich exact timing" token on GitHub.')
+      exact_setup_dialog(gh, after_github)
+    elsif ex && Rewards.exact_needs_update(data)
       key = secret_dialog('Update exact timing',
                           "The claim time changed to #{data['time']}. Paste your cron-job.org API key so Chrono can " \
                           'move its job (cron-job.org > Settings > API).', 'cron-job.org API key:', link: key_link)
@@ -1036,7 +1050,14 @@ class ChronoWindow
     end
   end
 
+  # Opens a web page in the browser. Only https addresses: the Windows way of opening a link also
+  # runs files, so nothing else is ever passed to it.
   def open_url(url)
+    url = url.to_s
+    unless url.match?(%r{\Ahttps://[^\s"'<>`]+\z}i) || (ENV['CHRONO_DEV'] == '1' && url.start_with?('http://127.0.0.1'))
+      gui_log("Not opening #{url[0, 100].inspect}: not an https address")
+      return error_dialog("Chrono only opens https web addresses, and this one isn't:\n\n#{url[0, 200]}")
+    end
     cmd = if Gem.win_platform? then ['rundll32', 'url.dll,FileProtocolHandler', url]
           elsif ChronoConfig.mac? then ['open', url]
           else ['xdg-open', url]
@@ -1056,8 +1077,9 @@ class ChronoWindow
       return unless !confirm || confirm_dialog(
         "This stores the Simutronics logins for #{wanted.map { |a| a[:name] }.join(', ')} as encrypted secrets in a " \
         "private repository on your GitHub account (#{ChronoGitHub::REPO_NAME}), and claims rewards there every day " \
-        "at about #{data['time']}.\n\nOnly GitHub can decrypt them, to run the claim. Chrono doesn't keep the " \
-        'GitHub sign-in; you\'ll sign in again only when changing something.'
+        "at about #{data['time']}.\n\nOnly GitHub can decrypt them, to run the claim. #{ChronoGitHub::ACTION_NOTICE}\n\n" \
+        'Chrono doesn\'t keep the GitHub sign-in; you\'ll sign in again only when changing something. ' \
+        "You can withdraw Chrono's GitHub access any time at #{ChronoGitHub::REVOKE_URL}"
       )
     else
       gh = Rewards.github_state(data)
@@ -1153,6 +1175,8 @@ class ChronoWindow
           set_busy(false, 'Ready.')
           if kind == :done
             intro.text = purpose == :sync ? 'GitHub is set up.' : 'GitHub claiming is off.'
+            after.text = "Chrono doesn't keep the GitHub sign-in. To withdraw its access to your GitHub " \
+                         "account, use #{ChronoGitHub::REVOKE_URL}"
             append_log(purpose == :sync ? "GitHub set up: #{lines.last}" : 'GitHub claiming turned off.')
           else
             intro.text = "That didn't work:\n#{val}"
@@ -1327,7 +1351,7 @@ class ChronoWindow
     error = nil
     worker = Thread.new do
       result = yield
-    rescue Fail, ChronoEAccess::Error => e
+    rescue *ChronoWindow.app_errors => e
       error = e.message
     rescue StandardError => e
       gui_log("UNEXPECTED ERROR: #{e.class}: #{e.message}\n    #{e.backtrace.first(5).join("\n    ")}")
@@ -2081,7 +2105,7 @@ class ChronoWindow
     st = read_status(name)
     return 'Offline' unless st
     return 'Offline' if st['state'] == 'offline'
-    unless pid_alive?(st['pid'])
+    unless lich_alive?(st)
       # The helper checked in recently, so Lich should be running. If the process check
       # disagrees, the check is wrong; say so instead of quietly showing Offline.
       if heartbeat_age(st) <= HEARTBEAT_STALE
@@ -2314,9 +2338,14 @@ class ChronoWindow
   end
 
   # Every button and timer goes through here, so no error disappears silently.
+  # Errors Chrono itself raises with a message meant for the player (not crashes).
+  def self.app_errors
+    [Fail, ChronoEAccess::Error, ChronoGitHub::Error, ChronoCronJob::Error, ChronoUpdate::Error]
+  end
+
   def safely
     yield
-  rescue Fail => e
+  rescue *ChronoWindow.app_errors => e
     gui_log("ERROR: #{e.message}")
     error_dialog(e.message)
   rescue StandardError => e
@@ -2358,8 +2387,10 @@ begin
                                           'Chrono will open anyway. Details are in chrono.log.')
   end
   $chrono_window = ChronoWindow.new
-  # Automated tests only: lets a test script drive the window. Unused in normal runs.
-  load ENV['CHRONO_GUI_TEST'] if ENV['CHRONO_GUI_TEST'] && File.exist?(ENV['CHRONO_GUI_TEST'])
+  # Automated tests only (needs CHRONO_DEV=1 as well): lets a test script drive the window.
+  if (test_script = ChronoConfig.dev_env('CHRONO_GUI_TEST')) && File.exist?(test_script)
+    load test_script
+  end
   # The system asks programs to quit with a signal (macOS at log-out and shutdown, Linux at the
   # end of a session). Quit cleanly, from the window's own timer, instead of treating it as a crash.
   %w[TERM HUP].each do |sig|

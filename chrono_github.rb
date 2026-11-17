@@ -18,21 +18,30 @@
 require 'json'
 require 'net/http'
 require 'uri'
-require 'base64'
+require 'time'
 require_relative 'chrono_sealedbox'
+require_relative 'chrono_config'
 
 module ChronoGitHub
   CLIENT_ID = 'Ov23likZ92yTQPZrZmg1' # Chrono4Lich's GitHub OAuth app (public by design; no secret)
-  WEB       = ENV['CHRONO_GITHUB_WEB'] || 'https://github.com'     # override for testing only
-  API       = ENV['CHRONO_GITHUB_API'] || 'https://api.github.com' # override for testing only
+  WEB       = ChronoConfig.dev_env('CHRONO_GITHUB_WEB') || 'https://github.com'     # (testing only)
+  API       = ChronoConfig.dev_env('CHRONO_GITHUB_API') || 'https://api.github.com' # (testing only)
   SCOPES    = 'repo workflow'
   REPO_NAME = 'chrono4lich-rewards'
-  # Where Chrono itself is published (for the update check). Override for testing only.
-  PROJECT_REPO = ENV['CHRONO_PROJECT_REPO'] || 'jmbreitfeld/Chrono4Lich'
+  # Where Chrono itself is published (for the update check).
+  PROJECT_REPO = ChronoConfig.dev_env('CHRONO_PROJECT_REPO') || 'jmbreitfeld/Chrono4Lich' # (override: testing only)
   PROJECT_URL  = "#{WEB}/#{PROJECT_REPO}"
   WORKFLOW  = 'rewards.yml'
-  ACTION    = 'elanthia-online/simu-rewards@v1'
+  # elanthia-online's simu-rewards action receives the account passwords, so it's pinned to one
+  # reviewed commit (v1.3.4) rather than the movable "v1" tag. Bump this on purpose, after reading
+  # what changed. When it changes, Chrono asks to update GitHub, which rewrites the workflow.
+  ACTION    = 'elanthia-online/simu-rewards@881e9d1b1cd59e5c0883c8939cde460264bd782c' # v1.3.4
   USER_AGENT = 'Chrono4Lich'
+  ACTION_NOTICE = 'The claim itself is done by simu-rewards, a separate project by elanthia-online (the Lich ' \
+                  'team), which receives the passwords while it runs. Chrono uses one fixed, checked version of it.'
+  # Where the user can withdraw Chrono's GitHub access (the sign-in is never saved by Chrono, but
+  # GitHub keeps the authorization until it's revoked there).
+  REVOKE_URL = 'https://github.com/settings/applications'
 
   class Error < StandardError; end
 
@@ -40,7 +49,7 @@ module ChronoGitHub
 
   # ---------- HTTP ----------
 
-  def http(method, url, body: nil, token: nil, form: false)
+  def http(method, url, body: nil, token: nil, form: false, headers: nil)
     uri = URI(url)
     req = Net::HTTP.const_get(method.capitalize).new(uri)
     req['User-Agent'] = USER_AGENT
@@ -59,6 +68,7 @@ module ChronoGitHub
       h.request(req)
     end
     data = res.body.to_s.empty? ? {} : (JSON.parse(res.body) rescue { 'message' => res.body.to_s[0, 200] })
+    res.each_header { |k, v| headers[k.downcase] = v } if headers
     [res.code.to_i, data]
   rescue SocketError, SystemCallError, Net::OpenTimeout, Net::ReadTimeout, OpenSSL::SSL::SSLError => e
     raise Error, "Couldn't reach GitHub: #{e.message}"
@@ -120,6 +130,10 @@ module ChronoGitHub
 
   BACKUP_DELAY = 3 * 3600 + 7 * 60 # backup run: 3h07m after the chosen time (off the busy top of the hour)
   CHECK_REF = 'chrono4lich-token-check' # a branch that doesn't exist; see check_run_token
+  # The exact-timing token expires after a year (GitHub's page is filled in that way); Chrono warns
+  # a month before, so it can be replaced in time.
+  TOKEN_DAYS = 365
+  TOKEN_WARN_DAYS = 30
 
   # local "HH:MM" -> the backup run's local "HH:MM"
   def backup_time(local_time)
@@ -284,14 +298,14 @@ module ChronoGitHub
   end
 
   def put_secret(token, repo, name, value, key)
-    sealed = SealedBox.seal(value.to_s, Base64.decode64(key['key']))
+    sealed = SealedBox.seal(value.to_s, key['key'].to_s.unpack1('m'))
     api(:put, "/repos/#{repo}/actions/secrets/#{name}", token,
-        { encrypted_value: Base64.strict_encode64(sealed), key_id: key['key_id'] })
+        { encrypted_value: [sealed].pack('m0'), key_id: key['key_id'] })
   end
 
   def put_file(token, repo, path, content, message)
     code, existing = http(:get, "#{API}/repos/#{repo}/contents/#{path}", token: token)
-    body = { message: message, content: Base64.strict_encode64(content) }
+    body = { message: message, content: [content].pack('m0') }
     body[:sha] = existing['sha'] if code == 200 && existing['sha']
     api(:put, "/repos/#{repo}/contents/#{path}", token, body)
   end
@@ -379,7 +393,10 @@ module ChronoGitHub
     return nil unless Gem::Version.correct?(version)
 
     assets = Array(data['assets']).map { |a| { name: a['name'].to_s, url: a['browser_download_url'].to_s, size: a['size'].to_i } }
-    { version: version, url: data['html_url'] || "#{PROJECT_URL}/releases/latest", notes: data['body'].to_s, assets: assets }
+    # The release page is opened in the browser: only ever a page of Chrono's own project.
+    page = data['html_url'].to_s
+    page = "#{PROJECT_URL}/releases/latest" unless page.start_with?("#{PROJECT_URL}/")
+    { version: version, url: page, notes: data['body'].to_s, assets: assets }
   rescue StandardError
     nil
   end
@@ -400,7 +417,7 @@ module ChronoGitHub
     q = URI.encode_www_form(name: 'Chrono4Lich exact timing',
                             description: "Lets cron-job.org start Chrono4Lich's daily rewards run in #{REPO_NAME}. " \
                                          'Only for that repository; can start runs, cannot read your logins.',
-                            expires_in: 'none', actions: 'write')
+                            expires_in: TOKEN_DAYS, actions: 'write')
     "#{WEB}/settings/personal-access-tokens/new?#{q}"
   end
 
@@ -409,6 +426,7 @@ module ChronoGitHub
   # then the branch (422), so 422 means the token works.
   # (Whether the token is limited to this one repository can't be checked: any token can see the
   # user's public repositories, so GitHub lists them all. The setup window asks for it instead.)
+  # Returns when the token expires (Time), or nil if GitHub didn't say.
   def check_run_token(token, repo)
     token = token.to_s.strip
     raise Error, 'Paste the token GitHub showed you (it starts with github_pat_).' if token.empty?
@@ -416,9 +434,11 @@ module ChronoGitHub
       raise Error, "That's a sign-in token, not the one from GitHub's token page. Create the token on that page and paste it."
     end
 
-    code, data = http(:post, dispatch_url(repo), body: { ref: CHECK_REF }, token: token)
+    headers = {}
+    code, data = http(:post, dispatch_url(repo), body: { ref: CHECK_REF }, token: token, headers: headers)
     case code
-    when 422, 200, 204 then true
+    when 422, 200, 204
+      (Time.parse(headers['github-authentication-token-expiration']) rescue nil)
     when 401 then raise Error, 'GitHub didn\'t accept that token. Check you copied all of it, or create a new one.'
     when 403 then raise Error, "The token can see #{repo} but can't start runs. On GitHub, edit the token: under " \
                                'Permissions, set "Actions" to "Read and write".'

@@ -15,10 +15,13 @@ for %%F in (chrono.rb chrono_gui.rbw chrono_schedule.rb chrono_eaccess.rb chrono
 )
 
 rem ---- find the Ruby that runs Lich ----
+rem In this order: Ruby4Lich5's "current" folder; its newest version folder (compared as versions);
+rem the Ruby that opens .rbw files; the first rubyw.exe on the PATH. Always confirmed below.
 set "RUBYW="
-for /f "delims=" %%R in ('where rubyw.exe 2^>nul') do if not defined RUBYW set "RUBYW=%%R"
-if not defined RUBYW if exist "C:\Ruby4Lich5\bin\rubyw.exe" set "RUBYW=C:\Ruby4Lich5\bin\rubyw.exe"
-if not defined RUBYW for /d %%D in ("C:\Ruby4Lich5\*" "C:\Ruby*") do if exist "%%~D\bin\rubyw.exe" set "RUBYW=%%~D\bin\rubyw.exe"
+if exist "C:\Ruby4Lich5\current\bin\rubyw.exe" set "RUBYW=C:\Ruby4Lich5\current\bin\rubyw.exe"
+if not defined RUBYW for /f "delims=" %%R in ('powershell -NoProfile -Command "$best=$null; foreach($x in @(Get-ChildItem -LiteralPath 'C:\Ruby4Lich5' -Directory -ErrorAction SilentlyContinue)){ if($x.Name -match '^[0-9]+([.][0-9]+){1,3}$' -and (Test-Path (Join-Path $x.FullName 'bin\rubyw.exe'))){ if(-not $best -or [version]$x.Name -gt [version]$best.Name){ $best=$x } } }; if($best){ Join-Path $best.FullName 'bin\rubyw.exe' }" 2^>nul') do set "RUBYW=%%R"
+if not defined RUBYW for /f "delims=" %%R in ('powershell -NoProfile -Command "$q=[char]34; $c=(Get-ItemProperty -LiteralPath 'Registry::HKEY_CLASSES_ROOT\RubyWFile\shell\open\command' -ErrorAction SilentlyContinue).'(default)'; if($c){ $c=$c.Trim(); if($c.StartsWith($q)){ $p=$c.Substring(1).Split($q)[0] } else { $p=$c.Split(' ')[0] }; if(Test-Path -LiteralPath $p){ $p } }" 2^>nul') do set "RUBYW=%%R"
+if not defined RUBYW for /f "delims=" %%R in ('where rubyw.exe 2^>nul') do if not defined RUBYW set "RUBYW=%%R"
 
 if defined RUBYW (
   echo  Found Ruby: !RUBYW!
@@ -52,12 +55,18 @@ if not exist "!RUBY!" (
 )
 
 echo  Checking that this Ruby has GTK, which the window needs. This takes a few seconds...
-"!RUBY!" -e "require 'gtk3'" >nul 2>&1
+set "GTKOUT=%TEMP%\chrono-gtk-check.txt"
+"!RUBY!" -e "require 'gtk3'" > "!GTKOUT!" 2>&1
 if errorlevel 1 (
-  echo  ERROR: This Ruby can't load GTK3. Use the Ruby that came with Lich, usually under C:\Ruby4Lich5.
+  echo  ERROR: This Ruby can't load GTK3. It said:
+  for /f "usebackq delims=" %%L in ("!GTKOUT!") do echo     %%L
+  echo  Use the Ruby that came with Lich, usually C:\Ruby4Lich5\current\bin\rubyw.exe.
+  echo  Don't run "gem install gtk3" on Lich's Ruby: it replaces the GTK that Lich itself needs.
+  del "!GTKOUT!" >nul 2>&1
   set "RUBYW="
   goto :askruby
 )
+del "!GTKOUT!" >nul 2>&1
 echo  OK.
 
 rem ---- command-line shortcut: chrono.bat ----

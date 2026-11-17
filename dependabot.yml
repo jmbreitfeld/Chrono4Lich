@@ -1,0 +1,8 @@
+# Keeps the pinned GitHub Actions (release.yml, checks.yml) up to date: Dependabot opens a pull
+# request with the new commit when an action has a new release. Review the change before merging.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

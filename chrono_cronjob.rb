@@ -12,9 +12,10 @@
 require 'json'
 require 'net/http'
 require 'uri'
+require_relative 'chrono_config'
 
 module ChronoCronJob
-  API   = ENV['CHRONO_CRONJOB_API'] || 'https://api.cron-job.org' # override for testing only
+  API   = ChronoConfig.dev_env('CHRONO_CRONJOB_API') || 'https://api.cron-job.org' # (testing only)
   WEB   = 'https://console.cron-job.org'
   KEY_PAGE = "#{WEB}/settings"
   TITLE = 'Chrono4Lich rewards'
@@ -143,7 +144,8 @@ module ChronoCronJob
 
   # IANA name like "America/Los_Angeles", or nil if it can't be told.
   def local_timezone
-    return ENV['CHRONO_TZ'] if ENV['CHRONO_TZ'].to_s.include?('/') # override
+    tz = ChronoConfig.dev_env('CHRONO_TZ')
+    return tz if tz.to_s.include?('/') # (testing only)
     if Gem.win_platform?
       name = `tzutil /g 2>NUL`.to_s.strip.sub(/_dstoff\z/, '')
       return WINDOWS_ZONES[name]

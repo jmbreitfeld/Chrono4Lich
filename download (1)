@@ -1,0 +1,5 @@
+dist/
+build/
+*.exe
+release-signing-key.txt
+tools/release-signing-key.txt

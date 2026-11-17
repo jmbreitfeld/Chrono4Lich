@@ -1,7 +1,7 @@
 # chrono_config.rb - where Lich is installed, saved next to the Chrono4Lich files.
 #
 # Order used to find the Lich folder:
-#   1. CHRONO_LICH_DIR environment variable (for testing)
+#   1. CHRONO_LICH_DIR environment variable (testing only: needs CHRONO_DEV=1 too)
 #   2. chrono_config.json in the Chrono4Lich folder (set by the window, or by
 #      "chrono set-lich-dir <folder>")
 #   3. the folder saved by lichsched, Chrono's old name, if it's still valid
@@ -24,6 +24,15 @@ module ChronoConfig
   # instead of systemd, and the Mac's own alerts and "open".
   def mac?
     RUBY_PLATFORM.include?('darwin')
+  end
+
+  # Test settings (where Chrono sends logins and tokens, which Lich folder it uses, ...) only count
+  # when CHRONO_DEV=1 is set as well, so nothing on a player's computer can redirect them by accident
+  # or on purpose. Returns the variable's value, or nil.
+  def dev_env(name)
+    return nil unless ENV['CHRONO_DEV'] == '1'
+    v = ENV[name]
+    v.nil? || v.empty? ? nil : v
   end
 
   # Paths are kept with / internally; show them the way the system writes them.
@@ -132,8 +141,8 @@ module ChronoConfig
   # Returns the Lich folder, or nil if it isn't set and can't be found unambiguously.
   # Raises if a saved folder is no longer a Lich folder, so that isn't silent.
   def lich_dir
-    if ENV['CHRONO_LICH_DIR'] && !ENV['CHRONO_LICH_DIR'].empty?
-      return normalize(ENV['CHRONO_LICH_DIR'])
+    if (dir = dev_env('CHRONO_LICH_DIR'))
+      return normalize(dir)
     end
     saved = load['lich_dir']
     if saved

@@ -5,7 +5,8 @@
 # built-in libsodium, so this implements exactly what crypto_box_seal does, from the published
 # algorithms, rather than making every user install a library:
 #   X25519 (RFC 7748), XSalsa20 + Poly1305 (NaCl crypto_box), BLAKE2b (RFC 7693).
-# Chrono's tests check it against the real libsodium (PyNaCl) on random inputs.
+# test/test_sealedbox.rb checks it against fixed results from the real libsodium (PyNaCl), in
+# test/sealedbox_vectors.json (made by test/make_sealedbox_vectors.py).
 #
 # Only encryption is needed: GitHub decrypts with its private key.
 
@@ -128,7 +129,12 @@ module SealedBox
   # ---------- crypto_box (XSalsa20-Poly1305 over an X25519 shared key) ----------
 
   def box(message, nonce24, public32, secret32)
-    shared = hsalsa20(x25519(secret32, public32), "\0".b * 16)
+    point = x25519(secret32, public32)
+    # A "low-order" public key gives an all-zero result whatever the secret; libsodium refuses
+    # those, and so does this.
+    raise ArgumentError, 'unusable public key' if point == "\0".b * 32
+
+    shared = hsalsa20(point, "\0".b * 16)
     stream = xsalsa20_stream(shared, nonce24, 32 + message.bytesize)
     cipher = xor(message, stream[32..])
     poly1305(cipher, stream[0, 32]) + cipher

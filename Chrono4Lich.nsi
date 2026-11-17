@@ -7,7 +7,15 @@ Unicode true
 !define FOLDER    "Chrono4Lich"
 !define PUBLISHER "Peggyanne"
 !ifndef VERSION   ; the GitHub build passes the release's version with -DVERSION=x.y.z
-  !define VERSION "1.9.1"
+  !define VERSION "1.10.0"
+!endif
+!ifndef SRC       ; where the files to install are (build.sh passes its prepared copies)
+  !define SRC "."
+!endif
+; Signing the uninstaller too: build with -DUNINST_SIGN="command" (NSIS runs it on the uninstaller,
+; with %1 as its path, before packing it into the installer).
+!ifdef UNINST_SIGN
+  !uninstfinalize '${UNINST_SIGN} "%1"' = 0
 !endif
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${FOLDER}"
 !define APPKEY    "Software\${FOLDER}"
@@ -35,6 +43,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PUBLISHER}. MIT License."
 !include "nsDialogs.nsh"
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
+!include "WordFunc.nsh"
 
 Var RubyW
 Var RubyDir
@@ -65,7 +74,8 @@ Page custom RubyPage RubyPageLeave
 ; ---------- finding Ruby ----------
 
 Function .onInit
-  ; Reuse the Ruby picked last time (by Chrono, or by lichsched before it), if it's still there.
+  ; Suggest the Ruby picked last time (by Chrono, or by lichsched before it), if it's still there.
+  ; Whichever Ruby is used, it's checked for GTK before installing (RubyPageLeave / CheckRuby).
   ReadRegStr $RubyW HKCU "${APPKEY}" "RubyW"
   ${If} $RubyW == ""
     ReadRegStr $RubyW HKCU "${OLDKEY}" "RubyW"
@@ -78,33 +88,69 @@ Function .onInit
   Call DetectRuby
 FunctionEnd
 
+; Lich's Ruby, in this order: Ruby4Lich5's "current" folder; else its newest version folder
+; (compared as versions, so 4.0.10 beats 4.0.9); else the Ruby that opens .rbw files; else rubyw.exe
+; on the PATH. (Other folders under C:\ aren't guessed at: anyone can create one there.)
 Function DetectRuby
-  ${If} ${FileExists} "C:\Ruby4Lich5\bin\rubyw.exe"
-    StrCpy $RubyW "C:\Ruby4Lich5\bin\rubyw.exe"
-  ${EndIf}
-  ; Ruby4Lich5\<version>\bin\rubyw.exe - the last version folder found wins
-  FindFirst $0 $1 "C:\Ruby4Lich5\*"
-  ${DoWhile} $1 != ""
-    ${If} $1 != "."
-    ${AndIf} $1 != ".."
-    ${AndIf} ${FileExists} "C:\Ruby4Lich5\$1\bin\rubyw.exe"
-      StrCpy $RubyW "C:\Ruby4Lich5\$1\bin\rubyw.exe"
-    ${EndIf}
-    FindNext $0 $1
-  ${Loop}
-  FindClose $0
-  ${If} $RubyW != ""
+  ${If} ${FileExists} "C:\Ruby4Lich5\current\bin\rubyw.exe"
+    StrCpy $RubyW "C:\Ruby4Lich5\current\bin\rubyw.exe"
     Return
   ${EndIf}
-  ; any other C:\Ruby* install
-  FindFirst $0 $1 "C:\Ruby*"
+  StrCpy $3 ""   ; newest version seen
+  FindFirst $0 $1 "C:\Ruby4Lich5\*"
   ${DoWhile} $1 != ""
-    ${If} ${FileExists} "C:\$1\bin\rubyw.exe"
-      StrCpy $RubyW "C:\$1\bin\rubyw.exe"
+    ${If} ${FileExists} "C:\Ruby4Lich5\$1\bin\rubyw.exe"
+      StrCpy $2 $1 1
+      ${If} $2 S>= "0"
+      ${AndIf} $2 S<= "9"
+        ${If} $3 == ""
+          StrCpy $3 $1
+        ${Else}
+          ${VersionCompare} $1 $3 $4   ; 1 = $1 is newer
+          ${If} $4 == 1
+            StrCpy $3 $1
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
     ${EndIf}
     FindNext $0 $1
   ${Loop}
   FindClose $0
+  ${If} $3 != ""
+    StrCpy $RubyW "C:\Ruby4Lich5\$3\bin\rubyw.exe"
+    Return
+  ${EndIf}
+  ; the program Windows opens .rbw files with: "C:\...\rubyw.exe" "%1" ...
+  ReadRegStr $0 HKCU "Software\Classes\RubyWFile\shell\open\command" ""
+  ${If} $0 == ""
+    ReadRegStr $0 HKLM "Software\Classes\RubyWFile\shell\open\command" ""
+  ${EndIf}
+  ${If} $0 != ""
+    StrCpy $1 $0 1
+    ${If} $1 == '"'
+      StrCpy $0 $0 "" 1
+      ${WordFind} $0 '"' "+1" $0
+    ${Else}
+      ${WordFind} $0 " " "+1" $0
+    ${EndIf}
+    ${If} ${FileExists} "$0"
+      StrCpy $RubyW $0
+      Return
+    ${EndIf}
+  ${EndIf}
+  SearchPath $0 "rubyw.exe"
+  ${If} $0 != ""
+    StrCpy $RubyW $0
+  ${EndIf}
+FunctionEnd
+
+; Checks that the Ruby in $RubyDir can load GTK. Sets $1 to "0" if it can, else $1 is the error
+; and $2 the first lines of what Ruby said.
+Function CheckRuby
+  nsExec::ExecToStack `"$RubyDir\ruby.exe" -e "require 'gtk3'; print 'ok'"`
+  Pop $1
+  Pop $2
+  StrCpy $2 $2 500
 FunctionEnd
 
 Function RubyPage
@@ -163,12 +209,10 @@ Function RubyPageLeave
 
   ; The window needs GTK, which Lich's Ruby includes.
   Banner::show /NOUNLOAD "Checking that this Ruby has GTK..."
-  nsExec::ExecToStack `"$RubyDir\ruby.exe" -e "require 'gtk3'; print 'ok'"`
-  Pop $1
-  Pop $2
+  Call CheckRuby
   Banner::destroy
   ${If} $1 != "0"
-    MessageBox MB_ICONEXCLAMATION "This Ruby can't load GTK3, which the Chrono window needs:$\r$\n$RubyDir$\r$\n$\r$\nPick the Ruby that came with Lich, usually under C:\Ruby4Lich5."
+    MessageBox MB_ICONEXCLAMATION "This Ruby can't load GTK3, which the Chrono window needs:$\r$\n$RubyDir$\r$\n$\r$\nRuby said:$\r$\n$2$\r$\n$\r$\nPick the Ruby that came with Lich, usually C:\Ruby4Lich5\current\bin\rubyw.exe. (Don't run 'gem install gtk3' on Lich's Ruby: it replaces the GTK that Lich itself needs.)"
     Abort
   ${EndIf}
 FunctionEnd
@@ -205,25 +249,34 @@ FunctionEnd
 ; ---------- install ----------
 
 Section "Install"
+  ; A silent install (/S) skips the Ruby page, so the Ruby is checked here instead.
+  ${If} ${Silent}
+    ${GetParent} "$RubyW" $RubyDir
+    Call CheckRuby
+    ${If} $1 != "0"
+      MessageBox MB_ICONSTOP "This Ruby can't load GTK3, which Chrono needs: $RubyDir$\r$\n$2" /SD IDOK
+      Abort
+    ${EndIf}
+  ${EndIf}
   SetOutPath "$INSTDIR"
   Call RemoveLichsched
 
-  File "chrono.rb"
-  File "chrono_config.rb"
-  File "chrono_schedule.rb"
-  File "chrono_eaccess.rb"
-  File "chrono_logins.rb"
-  File "chrono_rewards.rb"
-  File "chrono_lich_passwords.rb"
-  File "chrono_github.rb"
-  File "chrono_cronjob.rb"
-  File "chrono_update.rb"
-  File "chrono_sealedbox.rb"
-  File "chrono_gui.rbw"
-  File "chrono_helper.lic"
-  File "chrono.ico"
-  File "chrono.png"
-  File "README.txt"
+  File "${SRC}/chrono.rb"
+  File "${SRC}/chrono_config.rb"
+  File "${SRC}/chrono_schedule.rb"
+  File "${SRC}/chrono_eaccess.rb"
+  File "${SRC}/chrono_logins.rb"
+  File "${SRC}/chrono_rewards.rb"
+  File "${SRC}/chrono_lich_passwords.rb"
+  File "${SRC}/chrono_github.rb"
+  File "${SRC}/chrono_cronjob.rb"
+  File "${SRC}/chrono_update.rb"
+  File "${SRC}/chrono_sealedbox.rb"
+  File "${SRC}/chrono_gui.rbw"
+  File "${SRC}/chrono_helper.lic"
+  File "${SRC}/chrono.ico"
+  File "${SRC}/chrono.png"
+  File "${SRC}/README.txt"
   ; chrono_config.json (the saved Lich folder) is left alone on upgrades.
 
   ; command-line shortcut
@@ -283,6 +336,12 @@ Section "Uninstall"
     ${If} $2 != "0"
       MessageBox MB_ICONEXCLAMATION "Couldn't remove Chrono's scheduled tasks. Open Task Scheduler and delete the '${FOLDER}' folder by hand." /SD IDOK
     ${EndIf}
+    ; (after remove-tasks, which reads the schedules from this data)
+    MessageBox MB_YESNO|MB_ICONQUESTION "Also delete Chrono's data in your Lich folder (data\chrono: schedules, rewards settings and history, the log, and Chrono's backups of your saved logins)?$\r$\n$\r$\nLich's own saved logins aren't touched. Keep it if you might reinstall Chrono." /SD IDNO IDNO keep_data
+      DetailPrint "Deleting Chrono's data..."
+      nsExec::ExecToLog `"$1\ruby.exe" "$INSTDIR\chrono.rb" remove-data`
+      Pop $2
+    keep_data:
   ${Else}
     MessageBox MB_ICONEXCLAMATION "Lich's Ruby wasn't found, so Chrono's scheduled tasks couldn't be removed. Open Task Scheduler and delete the '${FOLDER}' folder by hand." /SD IDOK
   ${EndIf}
