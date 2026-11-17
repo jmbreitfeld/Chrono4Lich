@@ -7,9 +7,9 @@
   You normally never run this by hand. If Chrono says the helper isn't
   responding (for example after a ;kill), restart it with ;chrono_helper
 
-      game: Gemstone
+      game: any
       tags: login, logout, scheduler
-   version: 0.1.0
+   version: 0.2.0
 =end
 
 require 'json'
@@ -23,8 +23,11 @@ FileUtils.mkdir_p(state_dir)
 
 wait_until { XMLData.name.to_s != '' }
 char_name   = XMLData.name
-status_file = File.join(state_dir, "#{char_name}.status.json")
-cmd_file    = File.join(state_dir, "#{char_name}.cmd")
+# DragonRealms characters get their own file names, so a GemStone and a DragonRealms character
+# with the same name, played from the same Lich folder, never share files.
+file_base   = XMLData.game.to_s.upcase.start_with?('DR') ? "#{char_name}.dr" : char_name
+status_file = File.join(state_dir, "#{file_base}.status.json")
+cmd_file    = File.join(state_dir, "#{file_base}.cmd")
 
 current = {
   'name'      => char_name,

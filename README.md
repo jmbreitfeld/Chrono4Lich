@@ -1,6 +1,6 @@
 # Chrono (Chrono4Lich)
 
-Log GemStone IV characters in and out through [Lich5](https://github.com/elanthia-online/lich-5), by hand or on a schedule, on Windows, Linux and Mac.
+Log GemStone IV and DragonRealms characters in and out through [Lich5](https://github.com/elanthia-online/lich-5), by hand or on a schedule, on Windows, Linux and Mac.
 
 - **Characters:** tick as many characters as you like and log them in or out together.
 - **Schedules:** log characters in and out at set times on chosen days, even with the Chrono window closed.
@@ -58,6 +58,7 @@ Found a file signed this way that you don't trust, or a problem with this policy
 
 Chrono is by Peggyanne. It was inspired by, and works alongside, other players' work:
 
+- **Scott G. Daniel** contributed DragonRealms and Saga support, dark mode and text size, free-to-play detection, and the Characters tab filters.
 - [simu-rewards](https://github.com/elanthia-online/simu-rewards) by **Ondreian**. Chrono's reward claiming works the same way, and "Claim on GitHub" runs it.
 - **Lich5's account manager** by **OSXLich-Doug**. Chrono's Logins tab is modeled on it.
 - [Lich5](https://github.com/elanthia-online/lich-5) by Elanthia Online. Chrono drives Lich and uses its saved logins.

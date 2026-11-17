@@ -1,4 +1,4 @@
-# chrono_gui.rbw - window for logging GemStone IV characters in and out through Lich5
+# chrono_gui.rbw - window for logging GemStone IV and DragonRealms characters in and out through Lich5
 #
 # Keep this file next to chrono.rb. The installer (setup.exe or install.bat on Windows,
 # install.sh on Linux) makes the shortcut that starts it.
@@ -22,8 +22,8 @@ module LichFolderPicker
     r
   end
 
-  def browse(parent = nil)
-    d = Gtk::FileChooserDialog.new(title: 'Pick your Lich folder (the one with lich.rbw in it)',
+  def browse(parent = nil, title: 'Pick your Lich folder (the one with lich.rbw in it)')
+    d = Gtk::FileChooserDialog.new(title: title,
                                    parent: parent, action: :select_folder,
                                    buttons: [['Cancel', Gtk::ResponseType::CANCEL], ['Select', Gtk::ResponseType::ACCEPT]])
     dir = d.run == Gtk::ResponseType::ACCEPT ? d.filename : nil
@@ -238,6 +238,77 @@ module GuiPrefs
   end
 end
 
+# Light or dark, and how big the text is (Settings tab), kept in gui_settings.json.
+# Dark uses the theme's own dark version (GTK's "prefer dark"); "Match my computer" follows
+# the Mac's, Windows' or GNOME's light/dark setting, and is checked again every 30 seconds.
+# Text size scales the font GTK uses everywhere, from the size the system gave it.
+module Appearance
+  THEMES = [['auto', 'Match my computer'], ['light', 'Light'], ['dark', 'Dark']].freeze
+  SIZES  = [[100, 'Normal'], [125, 'Large'], [150, 'Larger'], [175, 'Largest'], [200, 'Huge']].freeze
+
+  module_function
+
+  def theme
+    t = GuiPrefs.get('theme', 'auto').to_s
+    THEMES.any? { |id, _| id == t } ? t : 'auto'
+  end
+
+  def text_scale = GuiPrefs.get('text_scale', 100).to_i.clamp(50, 300)
+
+  # The computer's own light/dark setting, where Chrono can tell (otherwise light).
+  def system_dark?
+    if ChronoConfig.mac?
+      IO.popen(%w[defaults read -g AppleInterfaceStyle], err: File::NULL, &:read).to_s.strip.casecmp?('dark')
+    elsif ChronoConfig.windows?
+      require 'win32/registry' # read directly: running reg.exe would flash a console window
+      Win32::Registry::HKEY_CURRENT_USER.open('Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') do |r|
+        r['AppsUseLightTheme'].to_i.zero?
+      end
+    else
+      IO.popen(%w[gsettings get org.gnome.desktop.interface color-scheme], err: File::NULL, &:read).to_s.include?('dark')
+    end
+  rescue StandardError, LoadError
+    false
+  end
+
+  def dark? = theme == 'dark' || (theme == 'auto' && system_dark?)
+
+  def css
+    @css ||= Gtk::CssProvider.new.tap do |p|
+      Gtk::StyleContext.add_provider_for_screen(Gdk::Screen.default, p, Gtk::StyleProvider::PRIORITY_APPLICATION)
+    end
+  end
+
+  # Applies both settings. Returns true if anything changed (so the caller can redraw).
+  def apply!
+    s = Gtk::Settings.default
+    @base_font ||= s.gtk_font_name.to_s
+    desc = Pango::FontDescription.new(@base_font)
+    base = desc.size.to_f / Pango::SCALE
+    base = 12.0 if base <= 0
+    desc.size = (base * text_scale / 100.0 * Pango::SCALE).round
+    want_dark = dark?
+    font = desc.to_s
+    # This runs every 30 seconds. Touch GTK only when something changed: each setting or style
+    # sheet change makes GTK restyle the whole window.
+    dark_changed = s.gtk_application_prefer_dark_theme? != want_dark
+    font_changed = s.gtk_font_name != font
+    s.gtk_application_prefer_dark_theme = want_dark if dark_changed
+    s.gtk_font_name = font if font_changed
+    # tick boxes and round buttons don't follow the font, so grow them with it (themes draw them 14-16px)
+    box = (14 * text_scale / 100.0).round
+    style = "check, radio { min-width: #{box}px; min-height: #{box}px; }"
+    unless @style == style
+      css.load(data: style)
+      @style = style
+    end
+    dark_changed || font_changed
+  rescue StandardError => e
+    gui_log("couldn't apply the appearance settings: #{e.class}: #{e.message}")
+    false
+  end
+end
+
 class ChronoWindow
   COL_CHECK   = 0
   COL_NAME    = 1
@@ -258,14 +329,28 @@ class ChronoWindow
     @busy = false
     @job_errors = []
     build_window
+    append_log("!!! DragonRealms characters are hidden: #{DR_LICH_DIR_PROBLEM}") if DR_LICH_DIR_PROBLEM
+    install_helpers
     safely { reload_characters }
     safely { refresh_status }
     GLib::Timeout.add(200) { safely { pump_queue }; true }
     GLib::Timeout.add_seconds(3) { safely { refresh_status unless @busy_refreshing }; true }
+    # "Match my computer": notice when the computer switches between light and dark
+    GLib::Timeout.add_seconds(30) { safely { refresh_appearance if Appearance.theme == 'auto' }; true }
     @win.show_all
     @win.iconify if ARGV.include?('--minimized') # opened at sign-in
     Autostart.refresh!
     check_for_update(quiet: true) if GuiPrefs.get('check_updates', true)
+  end
+
+  # Puts the current helper in each Lich folder's scripts folder, so it's there for Lich's
+  # autostart (Saga logins) even before Chrono logs anyone in from that folder.
+  def install_helpers
+    lich_folders.each do |dir|
+      ensure_helper!(dir)
+    rescue Fail, SystemCallError => e
+      gui_log("couldn't install #{HELPER}.lic into #{dir}: #{e.message}")
+    end
   end
 
   # ---------- updates and about ----------
@@ -377,7 +462,7 @@ class ChronoWindow
     d.modal = true
     d.program_name = 'Chrono'
     d.version = CHRONO_VERSION
-    d.comments = "Logs GemStone IV characters in and out through Lich5, by hand or on a schedule.\n" \
+    d.comments = "Logs GemStone IV and DragonRealms characters in and out through Lich5, by hand or on a schedule.\n" \
                  "Adds and manages Lich's saved logins (any frontend, plus Warlock).\n" \
                  'Claims monthly SimuCoins and, if you like, daily login rewards, on this computer or on GitHub.'
     d.website = ChronoGitHub::PROJECT_URL
@@ -420,11 +505,11 @@ class ChronoWindow
     root.pack_start(build_update_bar, expand: false, fill: false)
 
     notebook = Gtk::Notebook.new
-    notebook.append_page(build_characters_page, Gtk::Label.new('Characters'))
-    notebook.append_page(build_schedules_page, Gtk::Label.new('Schedules'))
-    notebook.append_page(build_rewards_page, Gtk::Label.new('Rewards'))
-    notebook.append_page(build_logins_page, Gtk::Label.new('Logins'))
-    notebook.append_page(build_settings_page, Gtk::Label.new('Settings'))
+    notebook.append_page(scrollable(build_characters_page), Gtk::Label.new('Characters'))
+    notebook.append_page(scrollable(build_schedules_page), Gtk::Label.new('Schedules'))
+    notebook.append_page(scrollable(build_rewards_page), Gtk::Label.new('Rewards'))
+    notebook.append_page(scrollable(build_logins_page), Gtk::Label.new('Logins'))
+    notebook.append_page(scrollable(build_settings_page), Gtk::Label.new('Settings'))
     root.pack_start(notebook, expand: true, fill: true)
 
     # output, shared by both tabs
@@ -451,6 +536,32 @@ class ChronoWindow
     outer = Gtk::Box.new(:vertical, 8)
     outer.margin = 6
 
+    # filters, kept for next time (GemStone only and DragonRealms only exclude each other)
+    filters = Gtk::Box.new(:horizontal, 12)
+    @hide_test = Gtk::CheckButton.new("Don't show Test")
+    @gs_only = Gtk::CheckButton.new('GemStone only')
+    @dr_only = Gtk::CheckButton.new('DragonRealms only')
+    @hide_test.active = GuiPrefs.get('hide_test', false) == true
+    @gs_only.active = GuiPrefs.get('game_filter', nil) == 'gs'
+    @dr_only.active = GuiPrefs.get('game_filter', nil) == 'dr'
+    @hide_test.signal_connect('toggled') { safely { filters_changed } }
+    [[@gs_only, @dr_only], [@dr_only, @gs_only]].each do |box, other|
+      box.signal_connect('toggled') do
+        safely do
+          if box.active? && other.active?
+            @filters_syncing = true
+            other.active = false
+            @filters_syncing = false
+          end
+          filters_changed
+        end
+      end
+    end
+    [@hide_test, @gs_only, @dr_only].each { |c| filters.pack_start(c, expand: false, fill: false) }
+    @filter_count = Gtk::Label.new('')
+    filters.pack_end(@filter_count, expand: false, fill: false)
+    outer.pack_start(filters, expand: false, fill: false)
+
     # character list
     @store = Gtk::ListStore.new(TrueClass, String, String, String, String, String)
     @view = Gtk::TreeView.new(@store)
@@ -460,7 +571,8 @@ class ChronoWindow
       iter[COL_CHECK] = !iter[COL_CHECK]
       remember_selection
     end
-    @view.append_column(Gtk::TreeViewColumn.new('', toggle, active: COL_CHECK))
+    @check_col = Gtk::TreeViewColumn.new('', toggle, active: COL_CHECK)
+    @view.append_column(@check_col)
     [['Character', COL_NAME], ['Realm', COL_REALM], ['Account', COL_ACCOUNT], ['Status', COL_STATUS]].each do |title, col|
       column = Gtk::TreeViewColumn.new(title, Gtk::CellRendererText.new, text: col)
       column.resizable = true
@@ -470,14 +582,14 @@ class ChronoWindow
     # A "Log in" / "Log out" button on each row: one character, whatever is ticked. A list
     # can't hold real buttons, so it shows a picture of one, drawn by a real (off-screen) button
     # in the current theme; clicks on it are handled below.
-    pics = row_button_images(['Log in', 'Log out'])
-    images = { login: pics['Log in'], logout: pics['Log out'] }
+    # (redrawn by refresh_appearance when the theme or text size changes)
+    @row_images = row_images
     cell = Gtk::CellRendererPixbuf.new
     cell.xpad = 4
     cell.xalign = 0
     @action_col = Gtk::TreeViewColumn.new('', cell)
     @action_col.set_cell_data_func(cell) do |_col, c, _model, iter|
-      img = images[row_action(iter)]
+      img = @row_images[row_action(iter)]
       c.visible = !img.nil?
       c.pixbuf = img if img
     end
@@ -492,6 +604,15 @@ class ChronoWindow
         false
       end
     end
+    # Double-clicking a character (or Enter on it) does what its row's button does: Log in or Log out.
+    # (Double-clicking the tick box only ticks it; the button handles its own clicks above.)
+    @view.signal_connect('row-activated') do |_view, path, column|
+      next if column == @check_col
+
+      iter = @store.get_iter(path)
+      action = iter && row_action(iter)
+      GLib::Idle.add { safely { row_action_clicked(iter[COL_SPEC], iter[COL_NAME], action) }; false } if action
+    end
     list_scroll = Gtk::ScrolledWindow.new
     list_scroll.set_policy(:automatic, :automatic)
     list_scroll.add(@view)
@@ -501,6 +622,10 @@ class ChronoWindow
     row1 = Gtk::Box.new(:horizontal, 6)
     row1.pack_start(button('Select all') { set_all_checks(true) }, expand: false, fill: false)
     row1.pack_start(button('Select none') { set_all_checks(false) }, expand: false, fill: false)
+    hint = Gtk::Label.new('Tip: double-click a character to log it in or out.')
+    hint.style_context.add_class('dim-label')
+    hint.margin_start = 6
+    row1.pack_start(hint, expand: false, fill: false)
     row1.pack_end(button('Reload characters') { reload_characters; refresh_status }, expand: false, fill: false)
     outer.pack_start(row1, expand: false, fill: false)
 
@@ -602,11 +727,22 @@ class ChronoWindow
     @rewards_info.wrap = true
     page.pack_start(@rewards_info, expand: false, fill: false)
 
-    # account, simucoins, daily, last result
-    # account, simucoins, daily, last result, claim on GitHub
-    @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass)
+    # free-to-play accounts get no rewards; hiding them is kept for next time
+    f2p_row = Gtk::Box.new(:horizontal, 12)
+    @hide_f2p = Gtk::CheckButton.new("Don't show F2P")
+    @hide_f2p.active = GuiPrefs.get('hide_f2p', false) == true
+    @hide_f2p.signal_connect('toggled') { safely { GuiPrefs.set('hide_f2p', @hide_f2p.active?); reload_rewards } }
+    f2p_row.pack_start(@hide_f2p, expand: false, fill: false)
+    @rewards_count = Gtk::Label.new('')
+    f2p_row.pack_end(@rewards_count, expand: false, fill: false)
+    page.pack_start(f2p_row, expand: false, fill: false)
+
+    # account, simucoins, daily, last result, claim on GitHub, has characters that get daily rewards,
+    # plan (F2P, Standard, Premium...), free-to-play
+    @rewards_store = Gtk::ListStore.new(String, TrueClass, TrueClass, String, TrueClass, TrueClass, String, TrueClass)
     @rewards_view = Gtk::TreeView.new(@rewards_store)
     @rewards_view.append_column(Gtk::TreeViewColumn.new('Account', Gtk::CellRendererText.new, text: 0))
+    @rewards_view.append_column(Gtk::TreeViewColumn.new('Plan', Gtk::CellRendererText.new, text: 6))
     [[1, 'SimuCoins', :coins], [2, 'Daily login rewards', :daily]].each do |col, title, key|
       toggle = Gtk::CellRendererToggle.new
       toggle.signal_connect('toggled') do |_, path|
@@ -618,7 +754,12 @@ class ChronoWindow
           reload_github_status
         end
       end
-      @rewards_view.append_column(Gtk::TreeViewColumn.new(title, toggle, active: col))
+      column = Gtk::TreeViewColumn.new(title, toggle, active: col)
+      # no box for a free-to-play account, nor a daily one for an account with no characters that get them
+      column.set_cell_data_func(toggle) do |_c, r, _m, it|
+        r.activatable = r.visible = !it[7] && (key != :daily || it[5])
+      end
+      @rewards_view.append_column(column)
     end
     gh_toggle = Gtk::CellRendererToggle.new
     gh_toggle.signal_connect('toggled') do |_, path|
@@ -630,7 +771,9 @@ class ChronoWindow
         reload_rewards
       end
     end
-    @rewards_view.append_column(Gtk::TreeViewColumn.new('Claim on GitHub', gh_toggle, active: 4))
+    gh_col = Gtk::TreeViewColumn.new('Claim on GitHub', gh_toggle, active: 4)
+    gh_col.set_cell_data_func(gh_toggle) { |_c, r, _m, it| r.activatable = r.visible = !it[7] }
+    @rewards_view.append_column(gh_col)
     last = Gtk::TreeViewColumn.new('Last result', Gtk::CellRendererText.new, text: 3)
     last.expand = true
     @rewards_view.append_column(last)
@@ -638,6 +781,8 @@ class ChronoWindow
     scroll = Gtk::ScrolledWindow.new
     scroll.set_policy(:automatic, :automatic)
     scroll.add(@rewards_view)
+    # ask for room for every account (there are only a few), so large text doesn't squeeze it
+    scroll.propagate_natural_height = true if scroll.respond_to?(:propagate_natural_height=)
     page.pack_start(scroll, expand: true, fill: true)
 
     row2 = Gtk::Box.new(:horizontal, 6)
@@ -721,13 +866,19 @@ class ChronoWindow
       end
     selected = @rewards_view.selection.selected&.[](0)
     @rewards_store.clear
-    Rewards.accounts(data).each do |a|
+    all = Rewards.accounts(data)
+    shown = @hide_f2p&.active? ? all.reject { |a| a[:free] } : all
+    @rewards_count&.text = shown.size == all.size ? "#{all.size} accounts" : "#{shown.size} of #{all.size} shown"
+    shown.each do |a|
       it = @rewards_store.append
       it[0] = a[:name]
       it[1] = a[:coins]
       it[2] = a[:daily]
       it[3] = a[:where] == 'github' ? 'claimed on GitHub (see "Open results on GitHub")' : Rewards.summary(a[:last])
       it[4] = a[:where] == 'github'
+      it[5] = a[:daily_ok]
+      it[6] = a[:plan].to_s
+      it[7] = a[:free]
       @rewards_view.selection.select_iter(it) if a[:name] == selected
     end
     reload_github_status(data)
@@ -1260,6 +1411,10 @@ class ChronoWindow
     row.pack_end(button('Refresh') { safely { reload_logins } }, expand: false, fill: false)
     page.pack_start(row, expand: false, fill: false)
 
+    logs_row = Gtk::Box.new(:horizontal, 6)
+    logs_row.pack_start(button('Open frontend logs') { safely { open_frontend_logs } }, expand: false, fill: false)
+    page.pack_start(logs_row, expand: false, fill: false)
+
     if SavedLogins.maximize_supported?
       @warlock_max = Gtk::CheckButton.new('Open Warlock full screen for every Warlock login')
       @warlock_max.signal_connect('toggled') do
@@ -1290,8 +1445,8 @@ class ChronoWindow
     page
   end
 
-  def reload_logins
-    @logins_store.clear
+  # Which file a Lich folder keeps its saved logins in, e.g. "entry.yaml (passwords: plaintext), Lich 5.24.1".
+  def saved_logins_kind
     kind =
       if SavedLogins.backend == :yaml
         mode = (File.exist?(SavedLogins.yaml_file) && SavedLogins.load_yaml['encryption_mode']) || 'plaintext'
@@ -1300,8 +1455,18 @@ class ChronoWindow
         'entry.dat'
       end
     ver = SavedLogins.lich_version
-    @logins_info.text = "Saved logins are in #{kind}#{ver ? ", Lich #{ver}" : ''}."
-    return unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
+    "#{kind}#{ver ? ", Lich #{ver}" : ''}"
+  end
+
+  def reload_logins
+    @logins_store.clear
+    text = "Saved logins are in #{saved_logins_kind} in #{ChronoConfig.disp(LICH_DIR)}."
+    if DR_LICH_DIR && DR_LICH_DIR != LICH_DIR
+      text = "GemStone logins are in #{saved_logins_kind} in #{ChronoConfig.disp(LICH_DIR)}.\nDragonRealms logins are in " \
+             "#{SavedLogins.in_folder(DR_LICH_DIR) { saved_logins_kind }} in #{ChronoConfig.disp(DR_LICH_DIR)}."
+    end
+    @logins_info.text = text
+    return unless SavedLogins.any_saved?
 
     open = (@logins_open ||= {})
     if @warlock_max
@@ -1322,7 +1487,7 @@ class ChronoWindow
       a[4] = ''
       a[5] = ''
       a[6] = 700
-      list.sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s, e[:frontend].to_s] }.each do |e|
+      list.sort_by { |e| [*game_order(e), e[:frontend].to_s] }.each do |e|
         c = @logins_store.append(a)
         c[0] = e[:char_name].to_s
         c[1] = realm_of(e)
@@ -1341,6 +1506,7 @@ class ChronoWindow
     reload_logins
     reload_characters
     refresh_status
+    reload_rewards # its accounts come from the saved logins
   end
 
   # Runs slow work (network, Lich commands) off the window's thread. The window stays
@@ -1425,8 +1591,11 @@ class ChronoWindow
     grid.attach(sc, 0, 4, 2, 1)
 
     frontend = Gtk::ComboBoxText.new
-    SavedLogins.frontends.each { |f| frontend.append_text(f) }
-    frontend.active = 0
+    fronts = SavedLogins.frontends
+    fronts.each { |f| frontend.append_text(f) }
+    # start on the frontend most of the saved logins use
+    usual = (SavedLogins.entries rescue []).map { |e| e[:frontend].to_s }.tally.max_by { |_, n| n }&.first
+    frontend.active = fronts.index(usual) || 0
     grid.attach(label.call('Frontend:'), 0, 5, 1, 1)
     grid.attach(frontend, 1, 5, 1, 1)
 
@@ -1484,7 +1653,7 @@ class ChronoWindow
                           it[3] = already ? 'already saved' : ''
                           it[4] = c[:game_code]
                         end
-                        status.text = chars.empty? ? 'This account has no GemStone characters in a game it\'s subscribed to.' :
+                        status.text = chars.empty? ? 'This account has no GemStone or DragonRealms characters in a game it\'s subscribed to.' :
                                                      'Password confirmed. Tick the characters to save.'
                         save.sensitive = !chars.empty?
                       },
@@ -1492,7 +1661,7 @@ class ChronoWindow
                         next if closed
                         lookup.sensitive = true
                         status.text = msg
-                      }) { ChronoEAccess.list_characters(acct, pw, data_dir: DATA_DIR) }
+                      }) { ChronoEAccess.list_characters(acct, pw, data_dir: DATA_DIR, codes: ChronoEAccess::ALL_CODES) }
       end
     end
     # changing the account or password means the list must be looked up again
@@ -1579,6 +1748,55 @@ class ChronoWindow
   def selected_login_account
     it = @logins_view.selection.selected
     it && it[3]
+  end
+
+  # The folders a frontend usually keeps its game logs in, most likely first. Saga's comes from
+  # its own settings; Warlock's is checked on a Mac, and elsewhere follows the folder library it
+  # uses. Chrono doesn't know the others'.
+  def frontend_log_folders(frontend)
+    home = Dir.home
+    case frontend.to_s.downcase
+    when 'saga' then [SagaPrefs.logs_dir]
+    when SavedLogins::WARLOCK
+      if ChronoConfig.mac?
+        [File.join(home, 'Library', 'Logs', 'WarlockFE warlock'), File.join(home, 'Library', 'Logs', 'WarlockFE')]
+      elsif ChronoConfig.windows?
+        local = ENV['LOCALAPPDATA'] || File.join(home, 'AppData', 'Local')
+        [File.join(local, 'warlock', 'WarlockFE', 'Logs'), File.join(local, 'WarlockFE warlock', 'Logs'),
+         File.join(local, 'WarlockFE', 'Logs')]
+      else
+        [File.join(ENV['XDG_STATE_HOME'] || File.join(home, '.local', 'state'), 'WarlockFE'),
+         File.join(ENV['XDG_CACHE_HOME'] || File.join(home, '.cache'), 'WarlockFE', 'logs')]
+      end
+    else []
+    end
+  end
+
+  # Opens the game-log folder of the selected login's frontend (with nothing selected, or an
+  # account, the frontend its logins all use).
+  def open_frontend_logs
+    it = @logins_view.selection.selected
+    entries = SavedLogins.entries
+    fronts =
+      if it && !it[4].to_s.empty? then [it[2].to_s]
+      elsif it then entries.select { |e| e[:user_id].to_s.casecmp?(it[3].to_s) }.map { |e| e[:frontend].to_s }
+      else entries.map { |e| e[:frontend].to_s }
+      end.uniq
+    return error_dialog('No saved logins yet.') if fronts.empty?
+    return error_dialog('These logins use different frontends. Click a character first.') if fronts.size > 1
+
+    fe = fronts.first
+    name = fe.capitalize
+    places = frontend_log_folders(fe)
+    return error_dialog("Chrono doesn't know where #{name} keeps its logs.") if places.empty?
+
+    dir = places.find { |d| File.directory?(d) }
+    unless dir
+      return error_dialog("Didn't find #{name}'s log folder. Looked in:\n\n" +
+                          places.map { |d| ChronoConfig.disp(d) }.join("\n"))
+    end
+    open_folder(dir)
+    append_log("Opened #{name}'s logs: #{ChronoConfig.disp(dir)}")
   end
 
   # The Frontend column: on a character row, click it for a dropdown of frontends (like Lich's).
@@ -1771,6 +1989,36 @@ class ChronoWindow
       page.pack_start(row, expand: false, fill: false)
     end
 
+    info.call('Appearance', 'Light or dark, and how big the text is. Changes apply right away.')
+    looks = Gtk::Box.new(:horizontal, 6)
+    looks.pack_start(Gtk::Label.new('Colors:'), expand: false, fill: false)
+    theme_box = Gtk::ComboBoxText.new
+    Appearance::THEMES.each { |id, label| theme_box.append(id, label) }
+    theme_box.active_id = Appearance.theme
+    theme_box.signal_connect('changed') do
+      safely do
+        GuiPrefs.set('theme', theme_box.active_id)
+        refresh_appearance
+        append_log("Colors: #{theme_box.active_text}.")
+      end
+    end
+    looks.pack_start(theme_box, expand: false, fill: false)
+    size_label = Gtk::Label.new('Text size:')
+    size_label.margin_start = 12
+    looks.pack_start(size_label, expand: false, fill: false)
+    size_box = Gtk::ComboBoxText.new
+    Appearance::SIZES.each { |pct, label| size_box.append(pct.to_s, "#{label} (#{pct}%)") }
+    size_box.active_id = Appearance.text_scale.to_s
+    size_box.signal_connect('changed') do
+      safely do
+        GuiPrefs.set('text_scale', size_box.active_id.to_i)
+        refresh_appearance
+        append_log("Text size: #{size_box.active_text}.")
+      end
+    end
+    looks.pack_start(size_box, expand: false, fill: false)
+    page.pack_start(looks, expand: false, fill: false)
+
     info.call('Lich folder', ChronoConfig.disp(LICH_DIR))
     lich_row = Gtk::Box.new(:horizontal, 6)
     change = button('Change Lich folder...') { change_lich_folder }
@@ -1778,6 +2026,21 @@ class ChronoWindow
     lich_row.pack_start(change, expand: false, fill: false)
     lich_row.pack_start(button('Open Lich folder') { open_folder(LICH_DIR) }, expand: false, fill: false)
     page.pack_start(lich_row, expand: false, fill: false)
+
+    # DragonRealms: the same Lich unless the person keeps a separate one for it
+    separate = DR_LICH_DIR && DR_LICH_DIR != LICH_DIR
+    dr_text =
+      if DR_LICH_DIR.nil? then "Not found. #{DR_LICH_DIR_PROBLEM}"
+      elsif separate then ChronoConfig.disp(DR_LICH_DIR)
+      else 'The same Lich folder as above. Change it only if you keep a separate Lich for DragonRealms.'
+      end
+    info.call('DragonRealms Lich folder', dr_text)
+    dr_row = Gtk::Box.new(:horizontal, 6)
+    dr_change = button('Change DragonRealms folder...') { change_dr_lich_folder }
+    @action_buttons << dr_change
+    dr_row.pack_start(dr_change, expand: false, fill: false)
+    dr_row.pack_start(button('Open DragonRealms folder') { open_folder(DR_LICH_DIR) }, expand: false, fill: false) if separate
+    page.pack_start(dr_row, expand: false, fill: false)
 
     reinstall = ChronoConfig.windows? ? 'run the installer again' : 'run install.sh again'
     info.call('Ruby', "#{ChronoConfig.disp(rubyw_path)}\nThis is the Ruby that opened Chrono. To use a different one, #{reinstall}.")
@@ -1817,6 +2080,18 @@ class ChronoWindow
     page
   end
 
+  # A tab's page that scrolls when large text makes it taller than the window, so the
+  # window never has to grow past the screen. With room to spare the page fills it as before.
+  def scrollable(page)
+    scroll = Gtk::ScrolledWindow.new
+    scroll.set_policy(:never, :automatic)
+    scroll.shadow_type = :none
+    scroll.add(page)
+    # give the page the height it asks for (scrolling past it) rather than squeezing its lists
+    scroll.child.vscroll_policy = :natural if scroll.child.respond_to?(:vscroll_policy=)
+    scroll
+  end
+
   def open_folder(dir)
     FileUtils.mkdir_p(dir)
     opener = ChronoConfig.windows? ? 'explorer.exe' : (ChronoConfig.mac? ? 'open' : 'xdg-open')
@@ -1834,6 +2109,21 @@ class ChronoWindow
     end
     ChronoConfig.save('lich_dir' => dir)
     gui_log("Lich folder changed to #{dir}; restarting")
+    Process.detach(Process.spawn(rubyw_path, File.join(ChronoConfig::APP_DIR, 'chrono_gui.rbw')))
+    Gtk.main_quit
+  end
+
+  # Picks the Lich folder DragonRealms characters log in through (picking GemStone's means
+  # one Lich for both), then restarts the window, since the folders are read when Chrono starts.
+  def change_dr_lich_folder
+    dir = LichFolderPicker.browse(@win, title: 'Pick the Lich folder you use for DragonRealms (the one with lich.rbw in it)') or return
+    fail! ChronoConfig.why_invalid(dir) unless ChronoConfig.valid_lich_dir?(dir)
+    dir = ChronoConfig.normalize(dir)
+    dir = nil if dir.casecmp?(LICH_DIR)
+    return if (dir || LICH_DIR).casecmp?(DR_LICH_DIR.to_s)
+
+    ChronoConfig.save('dr_lich_dir' => dir)
+    gui_log("DragonRealms Lich folder changed to #{dir || 'the GemStone one'}; restarting")
     Process.detach(Process.spawn(rubyw_path, File.join(ChronoConfig::APP_DIR, 'chrono_gui.rbw')))
     Gtk.main_quit
   end
@@ -1858,7 +2148,8 @@ class ChronoWindow
       iter[1] = Schedules.describe_days(s['days'])
       iter[2] = s['login_at']
       iter[3] = s['logout_at'] || 'after ~1 min'
-      iter[4] = s['characters'].map { |c| c.split(':').first }.join(', ')
+      # DragonRealms characters are marked, since a name can be in both games
+      iter[4] = s['characters'].map { |c| n, r = c.split(':', 2); dr_realm?(r) ? "#{n} (#{r})" : n }.join(', ')
       iter[5] = s['enabled'] == false ? 'off' : 'yes'
     end
   end
@@ -1919,7 +2210,7 @@ class ChronoWindow
   def edit_schedule_dialog(existing)
     entries = load_entries
     chars = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
-                   .sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s] }
+                   .sort_by { |e| game_order(e) }
 
     d = Gtk::Dialog.new(title: existing ? "Edit schedule '#{existing['name']}'" : 'New schedule',
                         parent: @win, flags: %i[modal destroy_with_parent])
@@ -2072,13 +2363,15 @@ class ChronoWindow
     @characters_loaded = true
     @store.clear
     # No saved logins yet is normal for a new user, not an error: point them at the Logins tab.
-    unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
+    unless SavedLogins.any_saved?
       append_log('No saved logins yet. Add your accounts on the Logins tab to get started.')
       return
     end
     entries = load_entries
-    shown = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
-    shown.sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s] }.each do |e|
+    all = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
+    shown = all.select { |e| shown_by_filters?(e) }
+    @filter_count&.text = shown.size == all.size ? "#{all.size} characters" : "#{shown.size} of #{all.size} shown"
+    shown.sort_by { |e| game_order(e) }.each do |e|
       spec = "#{e[:char_name]}:#{realm_of(e)}"
       iter = @store.append
       iter[COL_CHECK]   = checked.include?(spec)
@@ -2088,21 +2381,44 @@ class ChronoWindow
       iter[COL_STATUS]  = ''
       iter[COL_SPEC]    = spec
     end
-    append_log("Loaded #{shown.size} saved characters.") unless @loaded_message_shown
+    append_log("Loaded #{all.size} saved characters.") unless @loaded_message_shown
     @loaded_message_shown = true
+  end
+
+  # The Characters tab's filters. A character they hide isn't ticked: buttons act only on what's shown.
+  def shown_by_filters?(entry)
+    code = entry[:game_code].to_s.upcase
+    return false if @hide_test&.active? && %w[GST DRT].include?(code)
+    return false if @gs_only&.active? && dr_code?(code)
+    return false if @dr_only&.active? && !dr_code?(code)
+
+    true
+  end
+
+  def filters_changed
+    return if @filters_syncing
+
+    GuiPrefs.set('hide_test', @hide_test.active?)
+    GuiPrefs.set('game_filter', @gs_only.active? ? 'gs' : (@dr_only.active? ? 'dr' : nil))
+    reload_characters
+    refresh_status
+    remember_selection
   end
 
   def refresh_status
     @busy_refreshing = true
     @store.each do |_model, _path, iter|
-      iter[COL_STATUS] = status_text(iter[COL_NAME])
+      text = status_text(iter[COL_SPEC])
+      iter[COL_STATUS] = text unless iter[COL_STATUS] == text # (every 3 seconds: redraw only on a change)
     end
   ensure
     @busy_refreshing = false
   end
 
-  def status_text(name)
-    st = read_status(name)
+  # spec is the row's "Name:realm"; its game says where the helper's status file is.
+  def status_text(spec)
+    name = spec.split(':', 2).first
+    st = read_status(who_from_spec(spec))
     return 'Offline' unless st
     return 'Offline' if st['state'] == 'offline'
     unless lich_alive?(st)
@@ -2171,6 +2487,20 @@ class ChronoWindow
 
   # Pictures of small real buttons with these labels, all the same width (a size group makes
   # each as wide as the widest), in the current theme.
+  def row_images
+    pics = row_button_images(['Log in', 'Log out'])
+    { login: pics['Log in'], logout: pics['Log out'] }
+  end
+
+  # Applies the light/dark and text size settings, and redraws what doesn't follow by itself.
+  def refresh_appearance
+    return unless Appearance.apply!
+
+    @row_images = row_images
+    @view&.columns_autosize
+    @view&.queue_draw
+  end
+
   def row_button_images(labels)
     css = Gtk::CssProvider.new
     css.load(data: 'button { min-height: 0; padding: 1px 10px; }')
@@ -2266,7 +2596,8 @@ class ChronoWindow
 
   def pump_queue
     if $chrono_quit_signal # see the TERM/HUP trap at the bottom: quit like the close button would
-      gui_log("quitting (asked to by the system: SIG#{$chrono_quit_signal})")
+      gui_log($chrono_quit_signal == :quit_event ? 'quitting (Quit from the Dock)' :
+                                                    "quitting (asked to by the system: SIG#{$chrono_quit_signal})")
       $chrono_quit_signal = nil
       remember_window_size
       Gtk.main_quit
@@ -2369,10 +2700,52 @@ rescue StandardError => e # a missing icon must never stop the app from opening
   gui_log("Couldn't set the window icon: #{e.class}: #{e.message}")
 end
 
+# macOS: Quit in the Dock icon's menu sends the app a "quit" Apple event. GTK answers it only for
+# apps built on Gtk::Application, so Chrono ignored it. Take it here and quit like the close button,
+# from the window's own timer (the same way as for the signals below).
+def take_mac_quit_event
+  return unless ChronoConfig.mac?
+
+  require 'fiddle'
+  core = Fiddle.dlopen('/System/Library/Frameworks/CoreServices.framework/CoreServices')
+  install = Fiddle::Function.new(core['AEInstallEventHandler'],
+                                 [-Fiddle::TYPE_INT, -Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_CHAR],
+                                 Fiddle::TYPE_SHORT)
+  # kept in a global so it's never garbage-collected while macOS holds a pointer to it
+  $chrono_quit_handler = Fiddle::Closure::BlockCaller.new(Fiddle::TYPE_SHORT, [Fiddle::TYPE_VOIDP] * 3) do
+    $chrono_quit_signal = :quit_event
+    0 # noErr: handled
+  end
+  err = install.call('aevt'.unpack1('N'), 'quit'.unpack1('N'), $chrono_quit_handler, nil, 0)
+  gui_log("Couldn't take Quit from the Dock (error #{err})") unless err.zero?
+rescue StandardError, LoadError => e # never stop the window from opening over this
+  gui_log("Couldn't take Quit from the Dock: #{e.class}: #{e.message}")
+end
+
+# A crash inside Ruby itself or a library it runs (a segmentation fault) skips the crash handler
+# below. Ruby then writes its own report, which names the line it was on, to standard error. When
+# Chrono is opened from the Dock, Start menu or a shortcut, standard error goes nowhere, so send
+# it to window_errors.log next to chrono.log. GTK's warnings land there too. Left alone in a terminal.
+def keep_crash_reports
+  return if $stderr.tty? || !(defined?(STATE_DIR) && STATE_DIR)
+
+  ensure_state_dir
+  path = File.join(STATE_DIR, 'window_errors.log')
+  File.rename(path, "#{path}.old") if File.size?(path).to_i > 1_000_000
+  $stderr.reopen(path, 'a')
+  $stderr.sync = true
+  $stderr.puts "===== #{Time.now.strftime('%Y-%m-%d %H:%M:%S')}  Chrono #{CHRONO_VERSION} window opened " \
+               "(PID #{Process.pid}, Ruby #{RUBY_VERSION}) ====="
+rescue StandardError
+  nil # only a diagnostic; never stop the window from opening over it
+end
+
 begin
   setup_app_identity
   LichFolderPicker.ensure_configured
   require_relative 'chrono'
+  keep_crash_reports
+  Appearance.apply! # light/dark and text size (Settings tab), before any window is built
   begin
     waiting = migrate_from_lichsched!
     unless waiting.empty?
@@ -2398,6 +2771,7 @@ begin
   rescue ArgumentError
     nil # (no HUP on Windows)
   end
+  take_mac_quit_event
   Gtk.main
 rescue Exception => e # rubyw has no console, so a crash would otherwise vanish
   raise if e.is_a?(SystemExit) || e.is_a?(SignalException) # (Interrupt is a SignalException)

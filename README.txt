@@ -1,5 +1,5 @@
-Chrono (Chrono4Lich) - log GemStone IV characters in and out through Lich5, by hand or on a schedule
-=====================================================================================================
+Chrono (Chrono4Lich) - log GemStone IV and DragonRealms characters in and out through Lich5, by hand or on a schedule
+======================================================================================================================
 
 Chrono used to be called lichsched. Installing Chrono replaces lichsched and keeps your
 schedules and saved Lich folder.
@@ -67,7 +67,8 @@ INSTALL ON MAC
 USING IT
   Characters tab: tick characters, then Log in selected / Log out selected /
     Log out all. Or click the "Log in" button at the end of a row to log in just that
-    character (it says "Log out" while the character is online). Ticked characters log in at the same time (each one starts two
+    character (it says "Log out" while the character is online), or double-click the
+    character. Ticked characters log in at the same time (each one starts two
     seconds after the last, so they don't all hit the login server at once). "Force close" is only for when a normal logout fails; the
     character may stay linkdead in the game for a while.
   Schedules tab: New... makes a schedule (characters, days, login time, optional
@@ -84,7 +85,9 @@ USING IT
     characters to the selected account; "Change password..." after changing it on
     play.net; "Remove..." removes the selected character, or the whole account if an
     account is selected. Close Lich's login window first, or saving something there may
-    undo the change.
+    undo the change. "Open frontend logs" opens the folder where the selected login's
+    frontend keeps its game logs (Saga and Warlock; with nothing selected, the frontend
+    all your logins use).
     Warlock: pick "warlock" as the frontend. Lich starts Warlock with a launch command
     saved with the login (Lich's login window shows these as "stormfront" with a custom
     launch). Chrono fills the command in from a login that already uses Warlock, or with
@@ -98,9 +101,30 @@ USING IT
     the taskbar) and -x 0 -y 0. When Chrono logs the character in (by hand or on a
     schedule), it then maximizes Warlock's window ("Warlock - Name") once the character is
     in, so it fills the screen exactly. Logging in from Lich's own window only gets the size.
-  Settings tab: change the Lich folder, open the log folder, rebuild the
-    scheduled tasks, check for updates, and "Open Chrono (minimized) when I sign in"
-    (on Windows this adds Chrono to your startup apps; uninstalling removes it).
+    Saga: pick "saga" as the frontend. Saga logs characters in itself: Lich hands the login
+    to Saga, which signs in with the login saved in Saga (so the account must be saved
+    there too) and starts its own Lich for the character. Chrono can see that character
+    come online, and log it out (by hand or on a schedule), only if Chrono's helper runs
+    in Saga's Lich: type  ;autostart add --global chrono_helper  once in any GemStone game
+    window, and once in a DragonRealms one if you play it there too (each Lich folder keeps
+    its own list). Without it, Chrono starts the login, says it can't follow it, and you
+    log out in Saga. Saga starts each character's Lich from its own setting: the Lich
+    folder set for that character in Saga, or else Saga's default Lich folder. That must be
+    the Lich Chrono uses for the character's game. With a Lich for each game, keep Saga's
+    default on the GemStone one and set each DragonRealms character's Lich folder in Saga
+    to the DragonRealms one. Chrono checks this before handing a login to Saga, and won't
+    log in a character that Saga would start with the other game's Lich.
+  DragonRealms: characters saved for DragonRealms are listed with the realm dr (or
+    dr-platinum, dr-fallen, dr-test) and log in and out, by hand or on a schedule, like
+    GemStone ones. Chrono uses the same Lich folder for both games unless you keep a
+    separate Lich for DragonRealms (e.g. Lich5-DR): then pick it on the Settings tab with
+    "Change DragonRealms folder...". Rewards work for DragonRealms accounts too (SimuCoins,
+    and daily login rewards for DragonRealms Prime and Platinum characters).
+  Settings tab: colors (Match my computer, Light or Dark) and text size (Normal to Huge),
+    which apply right away; change the Lich folder (and the DragonRealms one), open the
+    log folder, rebuild the scheduled tasks, check for updates, and "Open Chrono
+    (minimized) when I sign in" (on Windows this adds Chrono to your startup apps;
+    uninstalling removes it).
   Chrono remembers which characters you ticked, your start scripts, and the window's size
   (and whether it was maximized) for next time.
   "About Chrono" (bottom right) shows the version and what Chrono does.
@@ -125,7 +149,7 @@ UPDATES
   chrono check-update
 
   Realms: Prime, Shattered and Test. (Platinum is retired; old Platinum logins still
-  show up but can't be added.)
+  show up but can't be added.) DragonRealms: dr (Prime), dr-platinum, dr-fallen, dr-test.
 
 SCHEDULES - GOOD TO KNOW
   - On Windows they are scheduled tasks (Task Scheduler, folder "Chrono4Lich");
@@ -141,20 +165,28 @@ SCHEDULES - GOOD TO KNOW
   - Only one character per account can be online at a time, so Chrono won't let
     one schedule contain two characters from the same account.
   - Everything is written to the log: Lich5/data/chrono/chrono.log
+  - If the window ever closes by itself without a message, Ruby's own crash report is
+    in window_errors.log in the same folder. Send it with chrono.log when reporting it.
 
 REWARDS
   - Tick "Claim rewards automatically every day at", pick a time, click Save. Chrono
     picks a random evening time to start with, so not everyone hits Simutronics'
     servers at once; change it if you like.
-  - SimuCoins (on for every account unless you untick it): your subscription bonus is
-    offered once a month. Chrono checks the store every day and presses Claim when it's
-    offered. "Next Subscription Bonus..." just means it isn't due yet. If the computer
-    was off at the scheduled time, the run happens as soon as it's back on.
+  - SimuCoins (on for every account unless you untick it): a paying account's
+    subscription bonus (GemStone or DragonRealms) is offered once a month. Chrono checks
+    the store every day and presses Claim when it's offered. "Next Subscription Bonus..."
+    just means it isn't due yet. If the computer was off at the scheduled time, the run
+    happens as soon as it's back on.
   - Daily login rewards (off unless you tick it, per account): Chrono briefly logs in
-    each Prime character on the account, collects the reward, and quits. Don't turn this
+    each GemStone Prime, DragonRealms Prime and DragonRealms Platinum character on the
+    account, collects the reward, and quits. (No box for an account with none of those
+    characters.) Don't turn this
     on for an account you might be playing at that time: a character online somewhere
     Chrono didn't start would be disconnected. If a character Chrono started is online,
     that account's daily logins are skipped that day.
+  - Free-to-play accounts get no rewards. Each run asks Simutronics' login service for
+    every account's plan (the way Lich does) and skips free-to-play ones; the Plan
+    column shows it (F2P, Standard, Premium), and "Don't show F2P" hides those accounts.
   - "Claim now" runs it right away; "Claim now for selected" does one account.
   - "History..." lists everything this computer has claimed or tried, newest first,
     with the last date SimuCoins were actually claimed for each account. (Accounts that
@@ -183,6 +215,8 @@ CLAIMING ON GITHUB (works while the computer is off)
   - To withdraw Chrono's access to your GitHub account entirely:
     https://github.com/settings/applications (Authorized OAuth Apps > Chrono4Lich > Revoke).
   - Each account claims either here or on GitHub, never both.
+  - An account with both GemStone and DragonRealms characters gets a claim for each game
+    on GitHub.
   - Chrono doesn't keep the GitHub sign-in. You sign in again only to change something.
     The Rewards tab says "NEEDS UPDATING" when that's needed: after changing which
     accounts claim on GitHub, the daily-login setting or time, or a saved password.
@@ -233,6 +267,7 @@ COMMAND LINE (optional)
     chrono status
     chrono logout all
     chrono config
+    chrono set-dr-lich-dir FOLDER   (a separate Lich for DragonRealms; "same" undoes it)
     chrono add-login ACCOUNT        (asks for the password, then which characters)
     chrono change-password ACCOUNT
     chrono remove-login Name
@@ -244,7 +279,7 @@ COMMAND LINE (optional)
     chrono github-stop
     chrono exact-setup              (cron-job.org starts the GitHub run on time)
     chrono exact-stop
-  A name can include its realm, e.g. Name:shattered.
+  A name can include its realm, e.g. Name:shattered, or Name:dr for a DragonRealms character.
 
 UPDATING, MOVING OR A NEW RUBY
   Windows setup.exe or Linux install.sh: just run the new one. Your Lich folder and
@@ -309,6 +344,8 @@ PRIVACY AND PASSWORDS
 
 CREDITS
   Chrono is by Peggyanne. It was inspired by, and works alongside, other players' work:
+  - Scott G. Daniel contributed DragonRealms and Saga support, dark mode and text size,
+    free-to-play detection, and the Characters tab filters.
   - simu-rewards by Ondreian (github.com/elanthia-online/simu-rewards): Chrono's reward
     claiming works the same way, and "Claim on GitHub" runs it.
   - Lich5's account manager by OSXLich-Doug: Chrono's Logins tab is modeled on it.

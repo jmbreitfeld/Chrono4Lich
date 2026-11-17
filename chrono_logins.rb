@@ -1,5 +1,5 @@
 # chrono_logins.rb - reads and changes Lich's saved logins.
-# Loaded by chrono.rb; needs its helpers (fail!, log, DATA_DIR, LICH_DIR, STATE_DIR, rubyw_path).
+# Loaded by chrono.rb; needs its helpers (fail!, log, LICH_DIR, lich_dir_for, lich_folders, rubyw_path).
 #
 # Lich keeps saved logins in one of two files:
 #   entry.yaml  newer Lich (5.13+). Passwords may be encrypted, possibly with a master password
@@ -17,7 +17,9 @@ require 'fileutils'
 
 module SavedLogins
   GAME_NAMES = { 'GS3' => 'GemStone IV', 'GSX' => 'GemStone IV Platinum',
-                 'GSF' => 'GemStone IV Shattered', 'GST' => 'GemStone IV Test' }.freeze
+                 'GSF' => 'GemStone IV Shattered', 'GST' => 'GemStone IV Test',
+                 'DR' => 'DragonRealms', 'DRX' => 'DragonRealms Platinum',
+                 'DRF' => 'DragonRealms The Fallen', 'DRT' => 'DragonRealms Test' }.freeze
   KEEP_BACKUPS = 10
   # Warlock isn't one of Lich's frontends: Lich runs it as a "custom launch" command saved with
   # the login (frontend stormfront, since Warlock speaks Stormfront's protocol). Chrono shows such
@@ -27,8 +29,46 @@ module SavedLogins
 
   module_function
 
-  def yaml_file = File.join(DATA_DIR, 'entry.yaml')
-  def dat_file  = File.join(DATA_DIR, 'entry.dat')
+  # ---------- which Lich folder ----------
+  # GemStone and DragonRealms logins can be saved in different Lich folders (see lich_dir_for).
+  # Everything below reads and changes the folder in use: GemStone's, unless inside in_folder.
+  # (Per thread, since the window changes saved logins in the background.)
+
+  def lich_dir = Thread.current[:chrono_lich_dir] || LICH_DIR
+  def data_dir = File.join(lich_dir, 'data')
+
+  def in_folder(dir)
+    old = Thread.current[:chrono_lich_dir]
+    Thread.current[:chrono_lich_dir] = dir
+    yield
+  ensure
+    Thread.current[:chrono_lich_dir] = old
+  end
+
+  # The Lich folder a game's logins are saved in.
+  def folder_for(game_code)
+    lich_dir_for(game_code) or fail! "Chrono can't find the DragonRealms Lich folder: #{DR_LICH_DIR_PROBLEM}"
+  end
+
+  # Lich folders where this account is saved.
+  def folders_with(account)
+    lich_folders.select { |dir| in_folder(dir) { saved_here?(account) } }
+  end
+
+  def saved_here?(account)
+    case backend
+    when :yaml then File.exist?(yaml_file) && (load_yaml['accounts'] || {}).keys.any? { |k| k.to_s.casecmp?(account) }
+    else File.exist?(dat_file) && dat_entries.any? { |e| e[:user_id].to_s.casecmp?(account) }
+    end
+  end
+
+  # Any saved logins at all, in any Lich folder Chrono uses.
+  def any_saved?
+    lich_folders.any? { |dir| in_folder(dir) { File.exist?(yaml_file) || File.exist?(dat_file) } }
+  end
+
+  def yaml_file = File.join(data_dir, 'entry.yaml')
+  def dat_file  = File.join(data_dir, 'entry.dat')
 
   # :yaml or :dat - which file Lich reads (or, with neither, which one a new login goes into).
   def backend
@@ -38,17 +78,17 @@ module SavedLogins
   end
 
   def lich_has_cli?
-    File.exist?(File.join(LICH_DIR, 'lib', 'common', 'cli', 'cli_orchestration.rb'))
+    File.exist?(File.join(lich_dir, 'lib', 'common', 'cli', 'cli_orchestration.rb'))
   end
 
   def lich_version
-    src = File.read(File.join(LICH_DIR, 'lib', 'version.rb')) rescue nil
+    src = File.read(File.join(lich_dir, 'lib', 'version.rb')) rescue nil
     src && src[/LICH_VERSION\s*=\s*['"]([^'"]+)/, 1]
   end
 
   # Frontends this Lich accepts for new logins (read from Lich itself when it says), plus Warlock.
   def frontends
-    helpers = File.join(LICH_DIR, 'lib', 'common', 'authentication', 'login_helpers.rb')
+    helpers = File.join(lich_dir, 'lib', 'common', 'authentication', 'login_helpers.rb')
     list = (File.read(helpers)[/VALID_FRONTENDS\s*=\s*%w\[([^\]]*)\]/, 1] rescue nil)&.split
     list = %w[stormfront wizard avalon] if list.nil? || list.empty?
     # the ones already in use come first, most used first
@@ -117,12 +157,18 @@ module SavedLogins
 
   # Turns "Open Warlock full screen" on or off for every saved Warlock login. Returns how many changed.
   def set_warlock_maximized_all(on)
+    lich_folders.sum { |dir| in_folder(dir) { set_warlock_maximized_here(on) } }
+  end
+
+  def set_warlock_maximized_here(on)
     n = 0
+    return 0 unless File.exist?(yaml_file) || File.exist?(dat_file)
+
     if backend == :yaml
       edit_yaml do |data|
         (data['accounts'] || {}).each_value do |acct|
           Array(acct['characters']).each do |c|
-            next unless warlock_launch?(c['custom_launch'])
+            next unless mine?(c['game_code']) && warlock_launch?(c['custom_launch'])
             next if on && maximized?(c['custom_launch']) # keep a size already chosen
 
             new_cmd = with_maximized(c['custom_launch'], on)
@@ -136,7 +182,7 @@ module SavedLogins
     else
       list = dat_entries
       list.each do |e|
-        next unless warlock_launch?(e[:custom_launch])
+        next unless mine?(e[:game_code]) && warlock_launch?(e[:custom_launch])
         next if on && maximized?(e[:custom_launch]) # keep a size already chosen
 
         new_cmd = with_maximized(e[:custom_launch], on)
@@ -171,11 +217,15 @@ module SavedLogins
     ["#{cmd} --host localhost --port %port% --key %key%", nil]
   end
 
-  # Saved GemStone logins without passwords:
-  #   [{char_name:, game_code:, game_name:, user_id:, frontend:, custom_launch:, custom_launch_dir:}]
+  # Saved GemStone and DragonRealms logins without passwords, each from the Lich folder used for
+  # its game: [{char_name:, game_code:, game_name:, user_id:, frontend:, custom_launch:, custom_launch_dir:}]
   # frontend is the one Chrono shows ("warlock" for a Warlock custom launch).
-  # (Lich also saves DragonRealms logins; Chrono leaves those alone.)
+  # (A login saved in the other game's folder isn't one Chrono would start, so it's left out.)
   def entries
+    lich_folders.flat_map { |dir| in_folder(dir) { entries_here } }
+  end
+
+  def entries_here
     list =
       case backend
       when :yaml then File.exist?(yaml_file) ? yaml_entries : []
@@ -184,8 +234,11 @@ module SavedLogins
           e.reject { |k, _| k == :password }.merge(frontend: shown_frontend(e[:frontend], e[:custom_launch]))
         end
       end
-    list.select { |e| GAME_NAMES.key?(e[:game_code].to_s) }
+    list.select { |e| GAME_NAMES.key?(e[:game_code].to_s) && mine?(e[:game_code]) }
   end
+
+  # Whether a game's logins belong to the Lich folder in use.
+  def mine?(game_code) = lich_dir_for(game_code) == lich_dir
 
   def yaml_entries
     data = load_yaml
@@ -218,13 +271,15 @@ module SavedLogins
 
   # ---------- backups and writing ----------
 
-  def backup_dir = File.join(STATE_DIR, 'backups')
+  # this Lich folder's, so each game's are kept apart
+  def backup_dir = File.join(data_dir, 'chrono', 'backups')
 
   # Backups hold passwords, so only the player's own account can read them (on Linux and Mac).
   def backup!(file)
     return unless File.exist?(file)
     ensure_state_dir
     FileUtils.mkdir_p(backup_dir, mode: 0o700)
+    File.chmod(0o700, File.dirname(backup_dir), backup_dir) unless Gem.win_platform?
     FileUtils.install(file, File.join(backup_dir, "#{File.basename(file)}.#{Time.now.strftime('%Y%m%d-%H%M%S-%L')}"), mode: 0o600)
     old = Dir.glob(File.join(backup_dir, "#{File.basename(file)}.*")).sort
     old.first([old.size - KEEP_BACKUPS, 0].max).each { |f| File.delete(f) }
@@ -272,7 +327,7 @@ module SavedLogins
     v = lich_version
     return true if v && (Gem::Version.new(v) >= STDIN_PASSWORD_LICH rescue false)
     # a development or pre-release Lich that already has it
-    src = File.read(File.join(LICH_DIR, 'lib', 'common', 'cli', 'cli_orchestration.rb')) rescue ''
+    src = File.read(File.join(lich_dir, 'lib', 'common', 'cli', 'cli_orchestration.rb')) rescue ''
     src.include?('--password-stdin')
   end
 
@@ -286,8 +341,8 @@ module SavedLogins
       args = args.map { |a| a.equal?(secret) ? '--password-stdin' : a } # same place: Lich reads it as the flag
       stdin = "#{secret}\n"
     end
-    cmd = [rubyw_path, File.join(LICH_DIR, 'lich.rbw'), *args]
-    out, status = Open3.capture2e(*cmd, chdir: LICH_DIR, stdin_data: stdin)
+    cmd = [rubyw_path, File.join(lich_dir, 'lich.rbw'), *args]
+    out, status = Open3.capture2e(*cmd, chdir: lich_dir, stdin_data: stdin)
     out = out.force_encoding(Encoding::UTF_8).scrub
     out = out.gsub(secret, '********') if secret && !secret.empty?
     [out.strip, status]
@@ -318,10 +373,15 @@ module SavedLogins
       fail! 'The Warlock command must mention warlock, so Lich and Chrono can tell it apart.' unless warlock_launch?(cmd)
       custom = [cmd, dir]
     end
-    if backend == :yaml
-      add_yaml(account, password, picked, frontend, custom)
-    else
-      add_dat(account, password, picked, frontend, custom)
+    # each character goes into the Lich folder used for its game
+    picked.group_by { |c| folder_for(c[:game_code]) }.sum do |dir, chars|
+      in_folder(dir) do
+        if backend == :yaml
+          add_yaml(account, password, chars, frontend, custom)
+        else
+          add_dat(account, password, chars, frontend, custom)
+        end
+      end
     end
   end
 
@@ -382,7 +442,16 @@ module SavedLogins
     added
   end
 
+  # Changes the account's password in every Lich folder it's saved in.
   def change_password(account, password)
+    dirs = folders_with(account)
+    fail! "Account #{account} isn't saved." if dirs.empty?
+    dirs.each { |dir| in_folder(dir) { change_password_here(account, password) } }
+    log "LOGINS changed the saved password for account #{account}"
+    Rewards.github_password_changed(account) if defined?(Rewards)
+  end
+
+  def change_password_here(account, password)
     if backend == :yaml
       key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
         fail! "Account #{account} isn't saved."
@@ -396,14 +465,16 @@ module SavedLogins
       write_dat(list)
     end
     forget_old_backups!
-    log "LOGINS changed the saved password for account #{account}"
-    Rewards.github_password_changed(account) if defined?(Rewards)
   end
 
   # Removes every saved login for this character in this game (all frontends).
   # frontend: only the saved login for that frontend (as Chrono shows it, e.g. "warlock");
   # nil removes the character's saved logins for every frontend.
   def remove(char_name, game_code, account, frontend: nil)
+    in_folder(folder_for(game_code)) { remove_here(char_name, game_code, account, frontend: frontend) }
+  end
+
+  def remove_here(char_name, game_code, account, frontend: nil)
     fe_ok = ->(fe, cl) { frontend.nil? || shown_frontend(fe, cl) == frontend }
     if backend == :yaml
       key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
@@ -426,21 +497,35 @@ module SavedLogins
     n
   end
 
-  # Removes an account and all its saved characters (what Lich's "Remove" does on an account row).
+  # Removes an account and all its saved characters (what Lich's "Remove" does on an account row),
+  # in every Lich folder it's saved in.
   def remove_account(account)
+    dirs = folders_with(account)
+    fail! "Account #{account} isn't saved." if dirs.empty?
+    dirs.each { |dir| in_folder(dir) { remove_account_here(account) } }
+    log "LOGINS removed account #{account} and its characters"
+  end
+
+  # In a Lich folder that also holds the other game's logins for this account (ones Chrono doesn't
+  # use from here, so doesn't show), only this folder's game's characters are removed.
+  def remove_account_here(account)
     if backend == :yaml
       key = (load_yaml['accounts'] || {}).keys.find { |k| k.to_s.casecmp?(account) } or
         fail! "Account #{account} isn't saved."
-      edit_yaml { |data| data['accounts'].delete(key) }
+      chars = Array(load_yaml.dig('accounts', key, 'characters'))
+      if chars.all? { |c| mine?(c['game_code']) }
+        edit_yaml { |data| data['accounts'].delete(key) }
+      else
+        remove_yaml_characters(key) { |c| mine?(c['game_code']) }
+      end
     else
       list = dat_entries
       before = list.size
-      list.reject! { |e| e[:user_id].to_s.casecmp?(account) }
+      list.reject! { |e| e[:user_id].to_s.casecmp?(account) && mine?(e[:game_code]) }
       fail! "Account #{account} isn't saved." if list.size == before
       write_dat(list)
     end
     forget_old_backups!
-    log "LOGINS removed account #{account} and its characters"
   end
 
   # Changes one saved login's frontend (from -> to, as Chrono shows them). "warlock" saves
@@ -455,6 +540,10 @@ module SavedLogins
   # launch command (launch: nil keeps the current one, or uses warlock_launch when switching to
   # Warlock). Passwords aren't touched.
   def edit_login(account, char_name, game_code, from, to, launch: nil)
+    in_folder(folder_for(game_code)) { edit_login_here(account, char_name, game_code, from, to, launch: launch) }
+  end
+
+  def edit_login_here(account, char_name, game_code, from, to, launch: nil)
     if to == WARLOCK && launch
       launch = launch.to_s.strip
       unless launch.include?('%port%') && launch.include?('%key%') && warlock_launch?(launch)

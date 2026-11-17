@@ -29,14 +29,16 @@ module ChronoEAccess
     '10b737e661987d15bc5c8245e3f8b78291d41ed8abc76672ecb02fe78ed0218a' # Simutronics Corp., Missouri; issued 2018-07-16, valid until 3017
   ].freeze
   GEMSTONE_CODES  = %w[GS3 GSF GST GSX].freeze
+  DRAGONREALMS_CODES = %w[DR DRF DRT DRX].freeze
+  ALL_CODES = (GEMSTONE_CODES + DRAGONREALMS_CODES).freeze
 
   class Error < StandardError; end
 
   module_function
 
-  # Returns [{game_code:, game_name:, char_name:}] for every GemStone character on the account
-  # in games the account is subscribed to.
-  def list_characters(account, password, data_dir: nil)
+  # Returns [{game_code:, game_name:, char_name:}] for every character on the account in the games
+  # given by codes (GemStone's unless told otherwise) that the account is subscribed to.
+  def list_characters(account, password, data_dir: nil, codes: GEMSTONE_CODES)
     account = account.to_s.strip
     raise Error, 'Enter the account name.' if account.empty?
     raise Error, 'Enter the password.' if password.to_s.empty?
@@ -48,7 +50,7 @@ module ChronoEAccess
       found = []
       games.sub(/\AM\t/, '').scan(/[^\t]+\t[^\t\n]+/).each do |pair|
         code, name = pair.split("\t")
-        next unless GEMSTONE_CODES.include?(code)
+        next unless codes.include?(code)
         next unless exchange(conn, "N\t#{code}\n").include?('STORM')
         next unless exchange(conn, "F\t#{code}\n") =~ /NORMAL|PREMIUM|TRIAL|INTERNAL|FREE/ # not subscribed: skip
 
@@ -59,6 +61,28 @@ module ChronoEAccess
           _slot, char_name = slot_name.split("\t")
           found << { game_code: code, game_name: name.strip, char_name: char_name.strip }
         end
+      end
+      found
+    ensure
+      conn.close rescue nil
+    end
+  end
+
+  # The account's plan in each of the given games it plays: {code => 'NORMAL'|'PREMIUM'|'TRIAL'|
+  # 'INTERNAL'|'FREE'}, the same answer Lich reads at login. FREE is free-to-play. Games the account
+  # doesn't play (the service says NEW_TO_GAME) are left out.
+  def plans(account, password, codes: ALL_CODES, data_dir: nil)
+    conn = connect(data_dir)
+    begin
+      games = authenticate(conn, account, password)
+      found = {}
+      games.sub(/\AM\t/, '').scan(/[^\t]+\t[^\t\n]+/).each do |pair|
+        code = pair.split("\t").first
+        next unless codes.include?(code)
+        next unless exchange(conn, "N\t#{code}\n").include?('STORM')
+
+        tier = exchange(conn, "F\t#{code}\n")[/NORMAL|PREMIUM|TRIAL|INTERNAL|FREE/]
+        found[code] = tier if tier
       end
       found
     ensure

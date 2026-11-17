@@ -9,9 +9,11 @@
 #   chrono kill   Name        (force-closes Lich; character may stay linkdead in game)
 #   chrono config             (shows which Lich folder and Ruby are used)
 #   chrono set-lich-dir "C:\path\to\Lich5"
+#   chrono set-dr-lich-dir "C:\path\to\Lich5-DR"   (only if DragonRealms uses another Lich; "same" undoes it)
 #
 # A name can carry its realm, e.g. Peggyanne:platinum. Without one, the realm is
 # found from entry.dat; --realm is only needed when a name is saved in more than one realm.
+# DragonRealms realms are dr, dr-platinum, dr-fallen and dr-test (e.g. Peggyanne:dr).
 #
 # chrono_helper.lic (kept next to this file) is copied into the Lich scripts folder
 # automatically whenever it's missing or out of date.
@@ -23,7 +25,7 @@ require 'time'
 require 'etc'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.10.0'
+CHRONO_VERSION = '1.11.0'
 require 'optparse'
 require_relative 'chrono_config'
 
@@ -57,20 +59,45 @@ rescue SystemCallError
   nil
 end
 
+# DragonRealms characters log in through the Lich folder used for DragonRealms: the same one as
+# GemStone's unless a separate one is set. Their saved logins and helper files are kept there.
+# Chrono's own files (schedules, log, settings) stay in the GemStone folder's data/chrono.
+begin
+  DR_LICH_DIR = LICH_DIR && ChronoConfig.dr_lich_dir(LICH_DIR)
+  DR_LICH_DIR_PROBLEM = nil
+rescue RuntimeError => e
+  DR_LICH_DIR = nil
+  DR_LICH_DIR_PROBLEM = e.message
+end
+DR_STATE_DIR = DR_LICH_DIR && File.join(DR_LICH_DIR, 'data', 'chrono')
+
 require_relative 'chrono_eaccess'
 require_relative 'chrono_logins'
 HELPER     = 'chrono_helper'
 HEARTBEAT_STALE = 45 # seconds
 ACK_TIMEOUT     = 20 # seconds for the helper to pick up a logout request
 
-# realm => [game code in entry.dat, extra lich.rbw flags]
+# realm => [game code in entry.dat, lich.rbw flags that pick that game]
 REALMS = {
-  'prime'     => ['GS3', []],
-  'platinum'  => ['GSX', ['--platinum']],
-  'shattered' => ['GSF', ['--shattered']],
-  'test'      => ['GST', ['--test']]
+  'prime'       => ['GS3', ['--gemstone']],
+  'platinum'    => ['GSX', ['--gemstone', '--platinum']],
+  'shattered'   => ['GSF', ['--gemstone', '--shattered']],
+  'test'        => ['GST', ['--gemstone', '--test']],
+  'dr'          => ['DR',  ['--dragonrealms']],
+  'dr-platinum' => ['DRX', ['--dragonrealms', '--platinum']],
+  'dr-fallen'   => ['DRF', ['--dragonrealms', '--fallen']],
+  'dr-test'     => ['DRT', ['--dragonrealms', '--test']]
 }.freeze
 GAME_TO_REALM = REALMS.map { |realm, (code, _)| [code, realm] }.to_h
+
+def dr_code?(game_code) = game_code.to_s.upcase.start_with?('DR')
+def dr_realm?(realm) = realm.to_s.downcase.start_with?('dr')
+
+# The Lich folder for a game code (nil for DragonRealms when its saved folder is gone).
+def lich_dir_for(game_code) = dr_code?(game_code) ? DR_LICH_DIR : LICH_DIR
+
+# The Lich folders that hold saved logins: GemStone's, and DragonRealms' when it's another one.
+def lich_folders = [LICH_DIR, DR_LICH_DIR].compact.uniq
 
 class Fail < StandardError; end
 
@@ -140,7 +167,7 @@ end
 
 # Saved logins without passwords, from entry.yaml (newer Lich) or entry.dat (older Lich).
 def load_entries
-  unless File.exist?(SavedLogins.yaml_file) || File.exist?(SavedLogins.dat_file)
+  unless SavedLogins.any_saved?
     fail! "No saved logins in #{ChronoConfig.disp(DATA_DIR)} yet. Add them on Chrono's Logins tab " \
           '(or "chrono add-login ACCOUNT"), or save them in Lich\'s login window.'
   end
@@ -151,12 +178,35 @@ def realm_of(entry)
   GAME_TO_REALM[entry[:game_code]] || entry[:game_code].to_s
 end
 
+# How Chrono follows a saved login's character: "Name" for GemStone (as it always has), and
+# "Name:realm" for DragonRealms, whose helper files are in the DragonRealms Lich folder.
+def who_of(entry)
+  dr_code?(entry[:game_code]) ? "#{entry[:char_name]}:#{realm_of(entry)}" : entry[:char_name].to_s
+end
+
+# Sort key for lists of characters: GemStone first, then DragonRealms, each by game and name.
+def game_order(entry)
+  [dr_code?(entry[:game_code]) ? 1 : 0, entry[:game_code].to_s, entry[:char_name].to_s]
+end
+
+# The same for a typed "Name" or "Name:realm". A name without a realm that's saved only for
+# DragonRealms means that DragonRealms character.
+def who_from_spec(spec)
+  name, realm = spec.to_s.split(':', 2)
+  name = name.to_s.capitalize
+  if realm.nil?
+    saved = (SavedLogins.entries rescue []).select { |e| e[:char_name].to_s.casecmp?(name) }
+    return who_of(saved.first) if !saved.empty? && saved.all? { |e| dr_code?(e[:game_code]) }
+  end
+  dr_realm?(realm) ? "#{name}:#{realm.downcase}" : name
+end
+
 # spec is "Name" or "Name:realm"
 def resolve_entry(entries, spec, default_realm)
   name, realm = spec.split(':', 2)
   realm = (realm || default_realm)&.downcase
   if realm && !REALMS.key?(realm)
-    fail! "Unknown realm '#{realm}' for #{name}. Use prime, platinum or shattered."
+    fail! "Unknown realm '#{realm}' for #{name}. Use #{REALMS.keys.join(', ')}."
   end
   matches = entries.select { |d| d[:char_name].to_s.casecmp?(name) }
   fail! "#{name} isn't in your saved logins. Run 'list' to see them, or add it on the Logins tab." if matches.empty?
@@ -182,13 +232,19 @@ end
 
 # ---------- status files written by the helper ----------
 
-def status_path(name)
-  File.join(STATE_DIR, "#{name.capitalize}.status.json")
+# who is "Name" or "Name:realm" (see who_of). The helper writes Name.status.json for GemStone and
+# Name.dr.status.json for DragonRealms, in the data/chrono folder of the Lich it runs in, so a
+# GemStone and a DragonRealms character with the same name never share a file.
+def helper_file(who, ext)
+  name, realm = who.to_s.split(':', 2)
+  dr = dr_realm?(realm)
+  dir = dr ? DR_STATE_DIR : STATE_DIR
+  fail! "Chrono can't find the DragonRealms Lich folder: #{DR_LICH_DIR_PROBLEM}" unless dir
+  File.join(dir, "#{name.capitalize}#{dr ? '.dr' : ''}.#{ext}")
 end
 
-def cmd_path(name)
-  File.join(STATE_DIR, "#{name.capitalize}.cmd")
-end
+def status_path(who) = helper_file(who, 'status.json')
+def cmd_path(who) = helper_file(who, 'cmd')
 
 def read_status(name)
   path = status_path(name)
@@ -384,11 +440,14 @@ def not_lich_of(name, st)
     return "process #{pid} started after #{name}'s Lich did (#{Time.at(started)} vs #{Time.at(since)}), so it's something else using a reused process ID"
   end
   cmd = process_command_line(pid)
+  char = name.to_s.split(':', 2).first # (DragonRealms names carry their realm: Name:dr)
   if cmd
     return "process #{pid} isn't Lich (#{cmd[0, 120]})" unless cmd.include?('lich.rbw')
-    unless cmd.match?(/--login[= ]+#{Regexp.escape(name)}(\s|\z)/i)
-      return "process #{pid} is Lich, but not #{name}'s (#{cmd[/--login[= ]+\S+/] || 'no --login'})"
-    end
+    # Chrono starts Lich with --login Name. (A Lich started by Saga may not say which character;
+    # then the start time above is what tells.)
+    login = cmd[/--login[= ]+(\S+)/, 1]
+    return "process #{pid} is Lich, but not #{char}'s (--login #{login})" if login && !login.casecmp?(char)
+    return "Chrono couldn't confirm that process #{pid} is #{char}'s Lich" if login.nil? && (started.nil? || since.zero?)
   elsif started.nil? || since.zero?
     return "Chrono couldn't confirm that process #{pid} is #{name}'s Lich"
   end
@@ -404,8 +463,17 @@ def heartbeat_age(st)
   Time.now.to_i - st['heartbeat'].to_i
 end
 
+# Status files the helper has written, as {who => path}: "Name" for GemStone, "Name:dr" for
+# DragonRealms.
+def status_files
+  gs = Dir.glob(File.join(STATE_DIR, '*.status.json')).reject { |f| f.end_with?('.dr.status.json') }
+                                                       .to_h { |f| [File.basename(f, '.status.json'), f] }
+  dr = DR_STATE_DIR ? Dir.glob(File.join(DR_STATE_DIR, '*.dr.status.json')) : []
+  gs.merge(dr.to_h { |f| ["#{File.basename(f, '.dr.status.json')}:dr", f] })
+end
+
 def online_names
-  Dir.glob(File.join(STATE_DIR, '*.status.json')).map { |f| File.basename(f, '.status.json') }.select { |n| online?(n) }
+  status_files.keys.select { |n| online?(n) }
 end
 
 # ---------- launching ----------
@@ -439,12 +507,12 @@ def cmd_list
     puts 'No characters are saved yet.'
     return
   end
-  puts format('%-16s %-10s %-20s %-16s %s', 'Character', 'Realm', 'Account', 'Frontend', 'Online')
+  puts format('%-16s %-12s %-20s %-16s %s', 'Character', 'Realm', 'Account', 'Frontend', 'Online')
   groups = entries.group_by { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
-  groups.values.map(&:first).sort_by { |e| [e[:game_code].to_s, e[:char_name].to_s] }.each do |e|
+  groups.values.map(&:first).sort_by { |e| game_order(e) }.each do |e|
     fronts = groups[[e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase]].map { |x| x[:frontend] }.uniq
-    puts format('%-16s %-10s %-20s %-16s %s', e[:char_name], realm_of(e), e[:user_id], fronts.join(','),
-                online?(e[:char_name].to_s) ? 'yes' : '')
+    puts format('%-16s %-12s %-20s %-16s %s', e[:char_name], realm_of(e), e[:user_id], fronts.join(','),
+                online?(who_of(e)) ? 'yes' : '')
   end
 end
 
@@ -466,8 +534,8 @@ def cmd_add_login(account, frontend)
   fail! 'Use: chrono add-login ACCOUNT [--frontend NAME]' unless account
   password = ask_password("Password for #{account}: ")
   puts 'Asking Simutronics for the characters on this account...'
-  chars = ChronoEAccess.list_characters(account, password, data_dir: DATA_DIR)
-  fail! "Account #{account} has no GemStone characters in a game it's subscribed to." if chars.empty?
+  chars = ChronoEAccess.list_characters(account, password, data_dir: DATA_DIR, codes: ChronoEAccess::ALL_CODES)
+  fail! "Account #{account} has no GemStone or DragonRealms characters in a game it's subscribed to." if chars.empty?
   saved = load_entries rescue []
   chars.each_with_index do |c, i|
     already = saved.any? { |e| e[:char_name].casecmp?(c[:char_name]) && e[:game_code] == c[:game_code] }
@@ -518,17 +586,17 @@ def cmd_remove_login(spec)
 end
 
 def cmd_status
-  files = Dir.glob(File.join(STATE_DIR, '*.status.json'))
+  files = status_files
   if files.empty?
     puts 'No characters have been started by Chrono yet.'
     return
   end
-  puts format('%-16s %-14s %-8s %-8s %s', 'Character', 'State', 'PID', 'Process', 'Heartbeat')
-  files.sort.each do |f|
+  puts format('%-20s %-14s %-8s %-8s %s', 'Character', 'State', 'PID', 'Process', 'Heartbeat')
+  files.sort_by { |who, _| [who.include?(':') ? 1 : 0, who] }.each do |who, f|
     st = JSON.parse(File.read(f))
     alive = lich_alive?(st)
     beat = alive ? "#{heartbeat_age(st)}s ago" : '-'
-    puts format('%-16s %-14s %-8s %-8s %s', st['name'], st['state'], st['pid'], alive ? 'running' : 'gone', beat)
+    puts format('%-20s %-14s %-8s %-8s %s', who, st['state'], st['pid'], alive ? 'running' : 'gone', beat)
     puts "    #{st['detail']}" if st['detail']
   end
 end
@@ -547,7 +615,7 @@ def check_account_conflicts(entries, selected)
       next if other[:char_name].to_s.casecmp?(entry[:char_name].to_s) # duplicate save of the same character
       next unless other[:game_code] == entry[:game_code]
       next unless other[:user_id].to_s.casecmp?(entry[:user_id].to_s)
-      if online?(other[:char_name].to_s)
+      if online?(who_of(other))
         fail! "#{other[:char_name]} is online on the same account as #{entry[:char_name]} (#{entry[:user_id]}). " \
               "Logging in #{entry[:char_name]} would kick it off. Log #{other[:char_name]} out first."
       end
@@ -569,14 +637,18 @@ end
 def start_login(entry, scripts)
   name = entry[:char_name]
   realm = realm_of(entry)
-  fail! "#{name} is already online (Lich PID #{read_status(name)['pid']})." if online?(name)
+  who = who_of(entry)
+  lich = lich_dir_for(entry[:game_code])
+  fail! "#{name} is already online (Lich PID #{read_status(who)['pid']})." if online?(who)
+  check_saga_lich_folder!(entry)
 
-  [cmd_path(name), status_path(name)].each { |p| File.delete(p) if File.exist?(p) }
+  [cmd_path(who), status_path(who)].each { |p| File.delete(p) if File.exist?(p) }
+  FileUtils.mkdir_p(File.dirname(status_path(who)))
   start_scripts = ([HELPER] + scripts).uniq.join(',')
-  args = [rubyw_path, File.join(LICH_DIR, 'lich.rbw'), '--gemstone', *REALMS[realm][1],
+  args = [rubyw_path, File.join(lich, 'lich.rbw'), *REALMS[realm][1],
           '--login', name, *warlock_flag(entry), "--start-scripts=#{start_scripts}"]
 
-  log "LOGIN  #{name} (#{realm}): starting Lich"
+  log "LOGIN  #{name} (#{realm}): starting Lich#{saga_entry?(entry) ? ', which hands the login to Saga' : ''}"
   # Lich must not inherit our stdout/stderr: if they are a pipe (the GUI), Lich would hold
   # it open for as long as the character is online and the GUI would wait forever.
   group = Gem.win_platform? ? { new_pgroup: true } : { pgroup: true }
@@ -598,10 +670,120 @@ def start_login(entry, scripts)
       nil
     end
   end
-  pid = Process.spawn(*args, chdir: LICH_DIR, **group,
+  pid = Process.spawn(*args, chdir: lich, **group,
                       in: File::NULL, out: File::NULL, err: File::NULL)
-  Process.detach(pid)
+  LAUNCHERS[pid] = Process.detach(pid)
   pid
+end
+
+# ---------- Saga ----------
+# Saga logs characters in itself. For a login saved with Saga as its frontend, Lich hands the
+# login to Saga (with the character, game and account) and exits; Saga then signs in with the
+# login saved in Saga and starts its own Lich for the character. Chrono's helper runs in that
+# Lich only if it's in Lich's autostart, and then reports in as usual, so Chrono can see the
+# character and log it out. Without it, Chrono can start a Saga login but not follow it.
+SAGA_REPORT_WAIT = (ChronoConfig.dev_env('CHRONO_SAGA_WAIT') || 60).to_i # seconds to wait for a Saga login's helper to report in
+LAUNCHERS = {} # Lich PID => the thread waiting for it to exit (its status says whether a Saga handoff worked)
+
+# Each game's Lich keeps its own autostart list, so this is typed once per game.
+def saga_tracking_hint(dr = false)
+  'To let Chrono see Saga logins and log them out, type  ;autostart add --global chrono_helper  ' \
+    "once in any #{dr ? 'DragonRealms' : 'GemStone'} game window."
+end
+
+def saga_entry?(entry)
+  entry[:frontend].to_s.casecmp?('saga') && entry[:custom_launch].to_s.strip.empty?
+end
+
+# Saga starts the character's Lich from its own setting: the Lich folder set for that character in
+# Saga, or else Saga's default Lich folder. Lich doesn't tell Saga which folder to use. With a Lich
+# kept for each game, that setting decides which game's Lich (scripts, settings) the session runs in.
+module SagaPrefs
+  module_function
+
+  # Saga's settings file (Electron's userData folder for Saga).
+  def file
+    return ChronoConfig.dev_env('CHRONO_SAGA_PREFS') if ChronoConfig.dev_env('CHRONO_SAGA_PREFS') # (testing only)
+    base = if Gem.win_platform? then ENV['APPDATA'] || File.join(Dir.home, 'AppData', 'Roaming')
+           elsif RUBY_PLATFORM.include?('darwin') then File.join(Dir.home, 'Library', 'Application Support')
+           else ENV['XDG_CONFIG_HOME'] || File.join(Dir.home, '.config')
+           end
+    File.join(base, 'saga', 'prefs.json')
+  end
+
+  # The Lich folder Saga will start this character with, or nil if Chrono can't tell (no Saga
+  # settings, or no folder set). Saga keys its per-character folders "account|game|name", in lower case.
+  def lich_dir_for(account, game_code, name)
+    prefs = JSON.parse(File.read(file))
+    return nil unless prefs.is_a?(Hash)
+
+    key = [account, game_code, name].map { |s| s.to_s.strip.downcase }.join('|')
+    overrides = prefs['lichDirs'].is_a?(Hash) ? prefs['lichDirs'] : {}
+    dir = (overrides[key] || prefs['lichDir']).to_s.strip
+    dir.empty? ? nil : dir
+  rescue SystemCallError, IOError, JSON::ParserError
+    nil
+  end
+
+  # Where Saga writes game logs: the log folder set in Saga, or else "logs" next to its settings.
+  def logs_dir
+    custom = (JSON.parse(File.read(file))['logFolder'] rescue nil).to_s.strip
+    custom.empty? ? File.join(File.dirname(file), 'logs') : custom
+  end
+
+  def same_folder?(a, b)
+    canon =->(d) { (File.realpath(ChronoConfig.normalize(d)) rescue ChronoConfig.normalize(d)) }
+    x, y = canon.(a), canon.(b)
+    # Mac and Windows folder names ignore case
+    Gem.win_platform? || RUBY_PLATFORM.include?('darwin') ? x.casecmp?(y) : x == y
+  end
+end
+
+# A Saga login that Saga would start with a different Lich than the one Chrono uses for that game
+# would run with the wrong scripts and settings (a DragonRealms character in the GemStone Lich, say),
+# and Chrono couldn't see it or log it out. Refuse it and say what to change in Saga.
+def check_saga_lich_folder!(entry)
+  return unless saga_entry?(entry)
+
+  saga_dir = SagaPrefs.lich_dir_for(entry[:user_id], entry[:game_code], entry[:char_name])
+  return unless saga_dir # can't tell: carry on, as before
+
+  want = lich_dir_for(entry[:game_code])
+  return if want.nil? || SagaPrefs.same_folder?(saga_dir, want)
+
+  game = dr_code?(entry[:game_code]) ? 'DragonRealms' : 'GemStone'
+  name = entry[:char_name]
+  fail! "Saga would start #{name} with the Lich in #{ChronoConfig.disp(saga_dir)}, but Chrono uses " \
+        "#{ChronoConfig.disp(want)} for #{game}, so #{name} would run with the wrong Lich's scripts and settings " \
+        "and Chrono couldn't log it out. Not logging in. In Saga, set #{name}'s Lich folder to " \
+        "#{ChronoConfig.disp(want)}, then try again."
+end
+
+# A Saga login after the Lich that handed it over has exited: nil while waiting for the helper
+# in Saga's Lich to report in, :handed once Chrono stops waiting, or raises Fail.
+def saga_handoff_progress(entry, pid, started)
+  who = who_of(entry)
+  dr = dr_code?(entry[:game_code])
+  if (waiter = LAUNCHERS.delete(pid))
+    unless waiter.value&.success?
+      fail! "Lich couldn't hand the login to Saga. Check that Saga is installed and has this account saved, " \
+            "and see Lich's debug log in #{File.join(lich_dir_for(entry[:game_code]), 'temp')}."
+    end
+    log "LOGIN  #{who}: handed to Saga, which logs in with the login saved in Saga"
+  end
+  return nil if Time.now < started + SAGA_REPORT_WAIT
+
+  log "LOGIN  #{who}: Chrono's helper didn't report in from Saga, so Chrono can't confirm this login " \
+      "or log it out (log out in Saga). #{saga_tracking_hint(dr)}#{dr ? dr_saga_folder_note : ''}"
+  :handed
+end
+
+# Saga's Lich for DragonRealms has to be the folder Chrono uses for DragonRealms, or Chrono looks
+# for the helper's reports in the wrong place.
+def dr_saga_folder_note
+  " (Chrono looks for DragonRealms characters in #{ChronoConfig.disp(DR_LICH_DIR)}; Saga must start them with " \
+    "that Lich too: in Saga, set the character's Lich folder to it. Chrono's DragonRealms Lich folder is set " \
+    'on the Settings tab.)'
 end
 
 # ---------- full-screen Warlock (Windows) ----------
@@ -630,9 +812,13 @@ module WarlockWindow
   # Warlock stays open, disconnected, after its Lich exits. Once a Warlock character's Lich has
   # exited after a logout, close its Warlock too: Mac/Linux by ending what's left of Lich's process
   # group (Warlock is in it), Windows by asking the "Warlock - Name" window to close.
-  def close_after_logout(name, lich_pid)
+  # who: "Name", or "Name:realm" for DragonRealms (see who_of), so only that game's login counts.
+  def close_after_logout(who, lich_pid)
+    name, realm = who.to_s.split(':', 2)
     entries = (load_entries rescue [])
-    return unless entries.any? { |e| e[:char_name].to_s.casecmp?(name) && e[:frontend] == SavedLogins::WARLOCK }
+    return unless entries.any? do |e|
+      e[:char_name].to_s.casecmp?(name) && dr_code?(e[:game_code]) == dr_realm?(realm) && e[:frontend] == SavedLogins::WARLOCK
+    end
 
     if Gem.win_platform?
       require 'fiddle'
@@ -643,15 +829,15 @@ module WarlockWindow
       return if hwnd.null?
 
       post.call(hwnd, 0x0010, nil, nil) # WM_CLOSE, as clicking its X
-      log "LOGOUT #{name}: closed Warlock's window"
+      log "LOGOUT #{who}: closed Warlock's window"
     else
       Process.kill('TERM', -lich_pid.to_i) # Lich's group; Lich itself is gone
-      log "LOGOUT #{name}: closed Warlock"
+      log "LOGOUT #{who}: closed Warlock"
     end
   rescue Errno::ESRCH, Errno::EPERM
     nil # nothing left in the group
   rescue StandardError, LoadError => e
-    log "LOGOUT #{name}: couldn't close Warlock: #{e.message}"
+    log "LOGOUT #{who}: couldn't close Warlock: #{e.message}"
   end
 
   # Looks for the character's Warlock window for up to WAIT seconds and maximizes it. true if done.
@@ -676,15 +862,19 @@ module WarlockWindow
   end
 end
 
-# nil while still logging in, :online, or raises Fail
-def login_progress(name, pid, deadline, timeout)
-  st = read_status(name)
+# nil while still logging in, :online, :handed (a Saga login Chrono can't follow), or raises Fail
+def login_progress(entry, pid, deadline, timeout, started: Time.now)
+  who = who_of(entry)
+  st = read_status(who)
   if st && st['state'] == 'online'
-    log "LOGIN  #{name}: online (Lich PID #{st['pid']})"
+    log "LOGIN  #{who}: online (Lich PID #{st['pid']})"
     return :online
   end
   unless pid_alive?(pid)
-    fail! "Lich exited before #{name} came online. Check Lich's debug log in #{File.join(LICH_DIR, 'temp')}."
+    return saga_handoff_progress(entry, pid, started) if saga_entry?(entry)
+
+    fail! "Lich exited before #{entry[:char_name]} came online. " \
+          "Check Lich's debug log in #{File.join(lich_dir_for(entry[:game_code]), 'temp')}."
   end
   return nil if Time.now < deadline
   fail! "did not report online within #{timeout}s. Lich (PID #{pid}) is still running, " \
@@ -694,8 +884,11 @@ end
 def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   entries = load_entries
   selected = specs.map { |s| resolve_entry(entries, s, default_realm) }.uniq
-  fail! "lich.rbw not found at #{File.join(LICH_DIR, 'lich.rbw')}." unless File.exist?(File.join(LICH_DIR, 'lich.rbw'))
-  ensure_helper!
+  selected.map { |e| e[:game_code] }.uniq.each do |code|
+    lich = lich_dir_for(code) or fail! "Chrono can't find the DragonRealms Lich folder: #{DR_LICH_DIR_PROBLEM}"
+    fail! "lich.rbw not found at #{File.join(lich, 'lich.rbw')}." unless File.exist?(File.join(lich, 'lich.rbw'))
+    ensure_helper!(lich)
+  end
   check_account_conflicts(entries, selected)
   ensure_state_dir
 
@@ -703,29 +896,33 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   # each Lich is started a few seconds after the previous one (so they don't all hit
   # Simutronics' login server and Lich's own files at the same instant), without waiting
   # for the previous one to finish logging in. Then Chrono waits for all of them.
+  # Characters are known by who_of ("Name", or "Name:realm" for DragonRealms).
   results = {}
-  waiting = {} # name => [pid, deadline, entry]
+  waiting = {} # who => [pid, deadline, entry, started]
   maximizers = [] # threads maximizing Warlock windows (Windows, full-screen Warlock logins)
   check = lambda do
-    waiting.to_a.each do |name, (pid, deadline, entry)|
-      next unless login_progress(name, pid, deadline, timeout)
+    waiting.to_a.each do |who, (pid, deadline, entry, started)|
+      progress = login_progress(entry, pid, deadline, timeout, started: started)
+      next unless progress
 
       # maximizing waits for the window, so it happens alongside the other logins
-      maximizers << Thread.new { WarlockWindow.maximize(name) } if WarlockWindow.wanted?(entry)
-      results[name] = nil
-      waiting.delete(name)
+      if progress == :online && WarlockWindow.wanted?(entry)
+        maximizers << Thread.new { WarlockWindow.maximize(entry[:char_name]) }
+      end
+      results[who] = nil
+      waiting.delete(who)
     rescue Fail => e
-      log "!!! LOGIN #{name} FAILED: #{e.message}", $stderr
-      results[name] = e.message
-      waiting.delete(name)
+      log "!!! LOGIN #{who} FAILED: #{e.message}", $stderr
+      results[who] = e.message
+      waiting.delete(who)
     end
   end
   launched = 0
   selected.each do |entry|
-    name = entry[:char_name]
-    if skip_online && online?(name.to_s)
-      log "LOGIN  #{name}: already online, skipped"
-      results[name] = nil
+    who = who_of(entry)
+    if skip_online && online?(who)
+      log "LOGIN  #{who}: already online, skipped"
+      results[who] = nil
       next
     end
     if launched > 0
@@ -733,10 +930,10 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
     end
     launched += 1
     begin
-      waiting[name] = [start_login(entry, scripts), Time.now + timeout, entry]
+      waiting[who] = [start_login(entry, scripts), Time.now + timeout, entry, Time.now]
     rescue Fail => e
-      log "!!! LOGIN #{name} FAILED: #{e.message}", $stderr
-      results[name] = e.message
+      log "!!! LOGIN #{who} FAILED: #{e.message}", $stderr
+      results[who] = e.message
     end
   end
   until waiting.empty?
@@ -745,12 +942,15 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   end
   # summary in the order the characters were picked
   maximizers.each(&:join)
-  summarize('Login', selected.map { |e| e[:char_name] }.select { |n| results.key?(n) }.to_h { |n| [n, results[n]] })
+  summarize('Login', selected.map { |e| who_of(e) }.select { |n| results.key?(n) }.to_h { |n| [n, results[n]] })
 end
 
 def request_logout(name)
   st = read_status(name)
-  fail! "no status. It wasn't started by Chrono, or the helper never ran." unless st
+  unless st
+    fail! "no status. It wasn't started by Chrono, or the helper never ran. " \
+          "(For a Saga login: #{saga_tracking_hint(dr_realm?(name.split(':', 2)[1]))})"
+  end
   fail! "Lich process (PID #{st['pid']}) isn't running. Last known state: #{st['state']}." unless lich_alive?(st)
   unless %w[online logout_failed].include?(st['state'])
     fail! "state is '#{st['state']}', not online. If the helper was stopped, restart it with ;#{HELPER} in that character's window."
@@ -770,7 +970,7 @@ def cmd_logout(specs, timeout, skip_offline: false)
     if specs.map(&:downcase) == ['all']
       online_names.tap { |n| fail! 'No characters started by Chrono are online.' if n.empty? }
     else
-      specs.map { |s| s.split(':', 2).first.capitalize }.uniq
+      specs.map { |s| who_from_spec(s) }.uniq
     end
 
   results = {}
@@ -817,7 +1017,7 @@ def cmd_logout(specs, timeout, skip_offline: false)
 end
 
 def cmd_kill(name)
-  name = name.split(':', 2).first.capitalize
+  name = who_from_spec(name)
   st = read_status(name)
   fail! "No status for #{name}." unless st
   fail! "#{name} isn't online (its last state was '#{st['state']}')." if st['state'] == 'offline'
@@ -856,15 +1056,16 @@ end
 
 # ---------- main ----------
 
-# Keeps the Lich scripts folder's copy of the helper the same as the one shipped with Chrono.
-def ensure_helper!
+# Keeps a Lich folder's copy of the helper the same as the one shipped with Chrono.
+def ensure_helper!(lich = LICH_DIR)
+  scripts = File.join(lich, 'scripts')
   bundled = File.join(ChronoConfig::APP_DIR, "#{HELPER}.lic")
-  target  = File.join(SCRIPT_DIR, "#{HELPER}.lic")
-  fail! "Lich's scripts folder is missing: #{SCRIPT_DIR}" unless File.directory?(SCRIPT_DIR)
+  target  = File.join(scripts, "#{HELPER}.lic")
+  fail! "Lich's scripts folder is missing: #{scripts}" unless File.directory?(scripts)
   if File.exist?(bundled)
     return if File.exist?(target) && File.binread(target) == File.binread(bundled)
     FileUtils.cp(bundled, target)
-    log "Installed #{HELPER}.lic into #{SCRIPT_DIR}"
+    log "Installed #{HELPER}.lic into #{scripts}"
   elsif !File.exist?(target)
     fail! "#{HELPER}.lic is missing. It should be in #{ChronoConfig::APP_DIR}, next to chrono.rb."
   end
@@ -878,6 +1079,10 @@ end
 
 def cmd_config
   puts "Lich folder:  #{LICH_DIR ? ChronoConfig.disp(LICH_DIR) : "(not set) #{LICH_DIR_PROBLEM}"}"
+  if LICH_DIR
+    dr = DR_LICH_DIR ? ChronoConfig.disp(DR_LICH_DIR) : "(not found) #{DR_LICH_DIR_PROBLEM}"
+    puts "DragonRealms: #{dr}#{DR_LICH_DIR == LICH_DIR ? ' (the same Lich folder)' : ''}"
+  end
   puts "Ruby:         #{ChronoConfig.disp(rubyw_path)}"
   puts "Config file:  #{ChronoConfig.disp(ChronoConfig::CONFIG_FILE)}"
   found = ChronoConfig.detect
@@ -891,6 +1096,20 @@ def cmd_set_lich_dir(dir)
   fail! ChronoConfig.why_invalid(dir) unless ChronoConfig.valid_lich_dir?(dir)
   ChronoConfig.save('lich_dir' => ChronoConfig.normalize(dir))
   puts "Lich folder set to #{ChronoConfig.disp(ChronoConfig.normalize(dir))}"
+  true
+end
+
+# chrono set-dr-lich-dir FOLDER   (or "same", for the same Lich folder as GemStone)
+def cmd_set_dr_lich_dir(dir)
+  fail! "Use: chrono set-dr-lich-dir \"#{ChronoConfig.example_lich_dir}\"   (or: same)" unless dir
+  if dir.casecmp?('same') || ChronoConfig.normalize(dir) == LICH_DIR
+    ChronoConfig.save('dr_lich_dir' => nil)
+    puts 'DragonRealms characters now use the same Lich folder as GemStone.'
+  else
+    fail! ChronoConfig.why_invalid(dir) unless ChronoConfig.valid_lich_dir?(dir)
+    ChronoConfig.save('dr_lich_dir' => ChronoConfig.normalize(dir))
+    puts "DragonRealms Lich folder set to #{ChronoConfig.disp(ChronoConfig.normalize(dir))}"
+  end
   true
 end
 
@@ -943,8 +1162,8 @@ def cmd_rewards
   list = Rewards.accounts(data)
   puts 'No saved accounts yet.' if list.empty?
   list.each do |a|
-    puts format('  %-16s SimuCoins %-4s Daily logins %-4s Claim on %-7s %s', a[:name], a[:coins] ? 'on' : 'off',
-                a[:daily] ? 'on' : 'off', a[:where] == 'github' ? 'GitHub' : 'this PC',
+    puts format('  %-16s %-9s SimuCoins %-4s Daily logins %-4s Claim on %-7s %s', a[:name], a[:plan] || '?',
+                a[:coins] ? 'on' : 'off', a[:daily] ? 'on' : 'off', a[:where] == 'github' ? 'GitHub' : 'this PC',
                 a[:where] == 'github' ? '' : Rewards.summary(a[:last]))
   end
   gh = Rewards.github_state(data)
@@ -1113,13 +1332,13 @@ def cmd_run_schedule(kind, name, scheduled_for: nil)
     end
     scripts = s['scripts'].to_s.split(',').map(&:strip).reject(&:empty?)
     # characters already online (someone is playing them) are skipped, and never logged out here
-    already = s['characters'].select { |spec| online?(spec.split(':').first) }
+    already = s['characters'].select { |spec| online?(who_from_spec(spec)) }
     ok = cmd_login(s["characters"], nil, scripts, 120, 2, skip_online: true)
     return ok if s['logout_at'] # logs out at its set time
 
     # No logout time: a quick login, as a safety limit. Once the game confirms they're in, stay
     # QUICK_STAY seconds (long enough to count as a login, e.g. for the daily reward), then log out.
-    ours = (s['characters'] - already).select { |spec| online?(spec.split(':').first) }
+    ours = (s['characters'] - already).select { |spec| online?(who_from_spec(spec)) }
     return ok if ours.empty?
 
     log "SCHEDULE #{s['name']}: no logout time, so logging out #{ours.join(', ')} in #{QUICK_STAY}s (quick login)"
@@ -1214,7 +1433,7 @@ $stderr.sync = true
 
 opts = { realm: nil, scripts: [], timeout: nil, gap: 2 }
 parser = OptionParser.new do |o|
-  o.banner = 'Usage: chrono <list|status|login|logout|kill|add-login|change-password|remove-login|rewards|rewards-set|run-rewards|github-setup|github-stop|exact-setup|exact-stop|config|set-lich-dir> [Name ...|all] [options]'
+  o.banner = 'Usage: chrono <list|status|login|logout|kill|add-login|change-password|remove-login|rewards|rewards-set|run-rewards|github-setup|github-stop|exact-setup|exact-stop|config|set-lich-dir|set-dr-lich-dir> [Name ...|all] [options]'
   o.on('--realm REALM', 'Realm for names saved in more than one realm') { |v| opts[:realm] = v.downcase }
   o.on('--scripts LIST', 'Comma-separated scripts to start after login') do |v|
     opts[:scripts] = v.split(',').map(&:strip).reject(&:empty?)
@@ -1267,6 +1486,7 @@ begin
     when 'remove-tasks'  then cmd_remove_tasks
     when 'remove-data'   then cmd_remove_data
     when 'set-lich-dir' then cmd_set_lich_dir(names.first)
+    when 'set-dr-lich-dir' then cmd_set_dr_lich_dir(names.first)
     when 'run-rewards'     then cmd_run_rewards(names)
     when 'github-setup'    then cmd_github_setup
     when 'github-stop'     then cmd_github_stop

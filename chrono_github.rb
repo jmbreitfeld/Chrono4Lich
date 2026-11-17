@@ -153,10 +153,16 @@ module ChronoGitHub
   # accounts: [{n:, name:, daily:}] - n is the secret number (ACCOUNTn/PASSWORDn)
   # exact: cron-job.org starts the daily run; GitHub's schedule is only the backup.
   def workflow_yaml(accounts, local_time, exact: false)
-    matrix = accounts.map do |a|
-      "          - account: ACCOUNT#{a[:n]}\n" \
-      "            password: PASSWORD#{a[:n]}\n" \
-      "            bypass_login: '#{a[:daily] ? 'false' : 'true'}'\n"
+    # one entry per account and game: simu-rewards claims one game per run (GS3 GemStone, DR DragonRealms)
+    matrix = accounts.flat_map do |a|
+      Array(a[:games] || ['GS3']).map do |game|
+        raise ArgumentError, "unknown game #{game}" unless %w[GS3 DR].include?(game)
+
+        "          - account: ACCOUNT#{a[:n]}\n" \
+        "            password: PASSWORD#{a[:n]}\n" \
+        "            game: #{game}\n" \
+        "            bypass_login: '#{a[:daily] ? 'false' : 'true'}'\n"
+      end
     end.join
     <<~YAML
       # Made by Chrono4Lich. Chrono replaces this file when you click "Set up / update GitHub",
@@ -187,7 +193,7 @@ module ChronoGitHub
             matrix:
               include:
       #{matrix.rstrip}
-          name: rewards ${{ matrix.account }}
+          name: rewards ${{ matrix.account }} ${{ matrix.game }}
           steps:
             # A failed claim (for example Simutronics' servers answering "internal server error")
             # is tried again after 5 minutes, then after 15. Claiming twice is harmless.
@@ -198,7 +204,7 @@ module ChronoGitHub
               with:
                 account: ${{ secrets[matrix.account] }}
                 password: ${{ secrets[matrix.password] }}
-                game: GS3
+                game: ${{ matrix.game }}
                 bypass_login: ${{ matrix.bypass_login }}
             - name: wait 5 minutes before trying again
               if: steps.try1.outcome == 'failure'
@@ -211,7 +217,7 @@ module ChronoGitHub
               with:
                 account: ${{ secrets[matrix.account] }}
                 password: ${{ secrets[matrix.password] }}
-                game: GS3
+                game: ${{ matrix.game }}
                 bypass_login: ${{ matrix.bypass_login }}
             - name: wait 15 minutes before the last try
               if: steps.try2.outcome == 'failure'
@@ -223,7 +229,7 @@ module ChronoGitHub
               with:
                 account: ${{ secrets[matrix.account] }}
                 password: ${{ secrets[matrix.password] }}
-                game: GS3
+                game: ${{ matrix.game }}
                 bypass_login: ${{ matrix.bypass_login }}
 
         keepalive:

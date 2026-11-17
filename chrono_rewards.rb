@@ -22,9 +22,9 @@ module Rewards
   HISTORY   = STATE_DIR && File.join(STATE_DIR, 'rewards_history.json')
   HISTORY_KEEP = 3000 # entries (years of daily runs for a few accounts)
   STORE     = ChronoConfig.dev_env('CHRONO_STORE_URL') || 'https://store.play.net' # (testing only)
-  SIGN_IN   = '/Account/SignIn?returnURL=%2Fstore%2Fpurchase%2Fgs'
   CLAIM     = '/Store/ClaimReward'
-  DAILY_GAME = 'GS3' # daily login rewards: GemStone Prime characters
+  # daily login rewards: GemStone Prime, DragonRealms Prime and Platinum characters (paying accounts)
+  DAILY_GAMES = %w[GS3 DR DRX].freeze
   USER_AGENT = 'Chrono4Lich (Lich login scheduler)'
   TASK_NAME  = 'Daily rewards'
   UNIT_BASE  = 'chrono-rewards'
@@ -39,6 +39,7 @@ module Rewards
     data['enabled'] = false unless data.key?('enabled')
     data['accounts'] ||= {}
     data['last'] ||= {}
+    data['plans'] ||= {} # account => {'plan' => 'F2P'|'Standard'|..., 'at' => time}, from the login service
     unless data['time']
       # spread everyone's runs out, as simu-rewards asks: a random evening time, never :00 or :30.
       # Picked once and kept.
@@ -57,16 +58,66 @@ module Rewards
     File.rename(tmp, FILE)
   end
 
-  # Accounts from the saved logins, with their reward settings.
-  # SimuCoins are claimed for every account unless turned off; daily login rewards are off
-  # unless turned on.
+  # Rewards are GemStone ones, so DragonRealms logins are left out.
+  # The store's sign-in page for a game ('GS' or 'DR'): an account's subscription bonus shows on
+  # its game's store page, and is claimed for that game.
+  def sign_in_path(game) = "/Account/SignIn?returnURL=%2Fstore%2Fpurchase%2F#{game.to_s.downcase}"
+
+  # Accounts from the saved logins (both games), with their reward settings.
+  # SimuCoins (the store, per account, on its game's page) are claimed for every account unless
+  # turned off. Daily login rewards are off unless turned on, and only for accounts with characters
+  # in a game that has them (daily_ok: see DAILY_GAMES).
   def accounts(data = load)
-    names = (load_entries rescue []).map { |e| e[:user_id].to_s.upcase }.uniq.sort
+    entries = (load_entries rescue [])
+    names = entries.map { |e| e[:user_id].to_s.upcase }.uniq.sort
     names.map do |a|
       cfg = data['accounts'][a] || {}
-      { name: a, coins: cfg.fetch('coins', true), daily: cfg.fetch('daily', false),
-        where: cfg.fetch('where', 'pc'), last: data['last'][a] }
+      mine = entries.select { |e| e[:user_id].to_s.casecmp?(a) }
+      gs = mine.any? { |e| !dr_code?(e[:game_code]) }
+      daily_ok = mine.any? { |e| DAILY_GAMES.include?(e[:game_code].to_s.upcase) }
+      plan = plan_of(data, a)
+      { name: a, coins: cfg.fetch('coins', true), daily: daily_ok && cfg.fetch('daily', false),
+        daily_ok: daily_ok, store_game: gs ? 'GS' : 'DR',
+        games: [('GS3' if gs), ('DR' if mine.any? { |e| dr_code?(e[:game_code]) })].compact, where: cfg.fetch('where', 'pc'), last: data['last'][a],
+        plan: plan, free: plan == 'F2P' }
     end
+  end
+
+  # ---------- free-to-play ----------
+  # Free-to-play accounts get no SimuCoin bonus and no daily login rewards, so runs skip them.
+  # Each run asks the login service for the account's plan (as Lich does at login) and keeps it.
+
+  PLAN_NAMES = { 'FREE' => 'F2P', 'TRIAL' => 'Trial', 'NORMAL' => 'Standard', 'PREMIUM' => 'Premium',
+                 'INTERNAL' => 'Internal' }.freeze
+  PLAN_GAMES = %w[GS3 GSX GSF DR DRX DRF].freeze # not the test servers
+
+  # The plan Chrono knows for an account: the one last read from the login service, or, before
+  # that, what the store last showed: no subscription reward at all (F2P) or one (Paid). nil if unknown.
+  def plan_of(data, account)
+    known = data.dig('plans', account, 'plan')
+    return known if known
+
+    case data.dig('last', account, 'coins', 'status')
+    when 'none' then 'F2P'
+    when 'claimed', 'not_due' then 'Paid'
+    end
+  end
+
+  # Asks the login service for the account's plan, keeps it, and returns it: F2P when it's free in
+  # every game it plays, else its best plan. nil if the service couldn't be asked.
+  def check_plan(account, password)
+    tiers = ChronoEAccess.plans(account, password, codes: PLAN_GAMES, data_dir: DATA_DIR)
+    return nil if tiers.empty?
+
+    best = tiers.values.max_by { |t| %w[FREE TRIAL NORMAL PREMIUM INTERNAL].index(t) }
+    plan = PLAN_NAMES[best]
+    data = load
+    data['plans'][account] = { 'plan' => plan, 'at' => Time.now.to_i }
+    save(data)
+    plan
+  rescue ChronoEAccess::Error => e
+    log "REWARDS #{account}: couldn't check the account's plan (#{e.message}); claiming as usual"
+    nil
   end
 
   def set_account(name, coins: nil, daily: nil, where: nil)
@@ -91,7 +142,7 @@ module Rewards
   # What GitHub was last set up with, to tell when it needs updating.
   # (Exact timing changes the workflow too: GitHub's schedule becomes the backup.)
   def github_signature(data = load)
-    sig = [github_accounts(data).map { |a| [a[:name], a[:daily]] }, data['time']]
+    sig = [github_accounts(data).map { |a| [a[:name], a[:daily], a[:games]] }, data['time']]
     sig << 'exact' if exact_state(data)
     JSON.generate(sig)
   end
@@ -229,7 +280,7 @@ module Rewards
     pw = passwords
     missing = wanted.reject { |a| pw[a[:name]].to_s != '' }
     fail! "No saved password for: #{missing.map { |a| a[:name] }.join(', ')}." unless missing.empty?
-    result = ChronoGitHub.sync!(token, wanted.map { |a| { name: a[:name], password: pw[a[:name]], daily: a[:daily] } },
+    result = ChronoGitHub.sync!(token, wanted.map { |a| { name: a[:name], password: pw[a[:name]], daily: a[:daily], games: a[:games] } },
                                 data['time'], exact: !exact_state(data).nil?,
                                 first_run: !(github_state(data) && !github_state(data)['stopped']), progress: progress)
     github_synced(result)
@@ -295,8 +346,16 @@ module Rewards
 
   # ---------- passwords from Lich's saved logins ----------
 
-  # {ACCOUNT => password}
+  # {ACCOUNT => password}, from every Lich folder Chrono uses (a separate DragonRealms Lich keeps
+  # its own saved logins). An account saved in both comes from the GemStone one.
   def passwords
+    lich_folders.reverse.each_with_object({}) do |dir, all|
+      all.merge!(SavedLogins.in_folder(dir) { passwords_here })
+    end
+  end
+
+  # The saved passwords in the Lich folder SavedLogins is working in.
+  def passwords_here
     if SavedLogins.backend == :dat
       SavedLogins.dat_entries.to_h { |e| [e[:user_id].to_s.upcase, e[:password].to_s] }
     else
@@ -328,7 +387,8 @@ module Rewards
     out = +''
     err = +''
     status = nil
-    Open3.popen3(rubyw_path, script, LICH_DIR, chdir: LICH_DIR) do |stdin, stdout, stderr, thr|
+    dir = SavedLogins.lich_dir
+    Open3.popen3(rubyw_path, script, dir, chdir: dir) do |stdin, stdout, stderr, thr|
       stdin.close
       readers = [Thread.new { out << stdout.read }, Thread.new { err << stderr.read }]
       unless thr.join(60)
@@ -448,14 +508,16 @@ module Rewards
   end
 
   # Returns {status: 'claimed'|'not_due'|'none', message:, balance:}.
-  def claim_coins(account, password)
+  # game: 'GS' or 'DR', the store page the account's subscription bonus shows on.
+  def claim_coins(account, password, game: 'GS')
     browser = Browser.new(STORE)
-    page = browser.get(SIGN_IN)
+    sign_in = sign_in_path(game)
+    page = browser.get(sign_in)
     token = page[/<input\b[^>]*name\s*=\s*"__RequestVerificationToken"[^>]*>/i].to_s[/value\s*=\s*"([^"]*)"/i, 1]
     raise StoreError, 'The store\'s sign-in page looks different than expected (it may be down for maintenance).' unless token
 
-    state = store_state(browser.post(SIGN_IN, 'UserName' => account, 'Password' => password,
-                                                '__RequestVerificationToken' => token))
+    state = store_state(browser.post(sign_in, 'UserName' => account, 'Password' => password,
+                                              '__RequestVerificationToken' => token))
     unless state[:login].downcase.include?(account.downcase)
       raise StoreError, "The store didn't accept the password for #{account}." if state[:login].downcase.include?('sign in')
       raise StoreError, "Signing in to the store as #{account} didn't work."
@@ -468,7 +530,7 @@ module Rewards
       return { status: 'none', message: 'The store shows no subscription reward for this account.', balance: state[:balance] }
     end
 
-    after = store_state(browser.post(CLAIM, 'game' => 'GS'))
+    after = store_state(browser.post(CLAIM, 'game' => game))
     unless after[:reward].downcase.start_with?('claimed')
       raise StoreError, "The store didn't confirm the claim#{after[:reward].empty? ? '' : " (it said: #{after[:reward][0, 100]})"}."
     end
@@ -481,6 +543,7 @@ module Rewards
 
   # Enters the game with a one-time key, waits for the login reward (or the game prompt if it
   # was already claimed today), then quits. Returns the reward text or 'already claimed today'.
+  # GemStone and DragonRealms word the reward the same way.
   def enter_and_quit(otp, timeout: 60)
     sock = Socket.tcp(game_host_override || otp[:host], otp[:port], connect_timeout: 10)
     begin
@@ -522,25 +585,31 @@ module Rewards
     raise StoreError, "couldn't connect to the game: #{e.message}"
   end
 
-  # Returns [[character, result-or-error, ok?], ...]
+  # Returns [[character, result-or-error, ok?], ...]. DragonRealms characters are named with
+  # their game, e.g. "Name (DR)".
   def daily_logins(account, password)
-    chars = ChronoEAccess.list_characters(account, password, data_dir: DATA_DIR)
-                         .select { |c| c[:game_code] == DAILY_GAME }.map { |c| c[:char_name] }
-    return [['(none)', 'no Prime characters on this account', true]] if chars.empty?
+    chars = ChronoEAccess.list_characters(account, password, data_dir: DATA_DIR, codes: DAILY_GAMES)
+                         .select { |c| DAILY_GAMES.include?(c[:game_code]) }
+    if chars.empty?
+      return [['(none)', 'no GemStone Prime or DragonRealms Prime/Platinum characters on this account', true]]
+    end
 
-    chars.each_with_index.map do |name, i|
+    chars.each_with_index.map do |c, i|
+      name = c[:char_name]
+      code = c[:game_code]
+      label = dr_code?(code) ? "#{name} (#{code})" : name
       sleep 1 if i.positive?
       attempt = 0
       begin
         attempt += 1
-        otp = ChronoEAccess.launch_key(account, password, DAILY_GAME, name, data_dir: DATA_DIR)
-        [name, enter_and_quit(otp), true]
+        otp = ChronoEAccess.launch_key(account, password, code, name, data_dir: DATA_DIR)
+        [label, enter_and_quit(otp), true]
       rescue ChronoEAccess::Error, StoreError => e
         if attempt < 3
           sleep 3
           retry
         end
-        [name, e.message, false]
+        [label, e.message, false]
       end
     end
   end
@@ -568,13 +637,16 @@ module Rewards
       name = acct[:name]
       result = { 'at' => Time.now.to_i, 'ok' => true }
       password = pw[name]
-      unless password && !password.empty?
+      if password.to_s.empty?
         result.merge!('ok' => false, 'error' => 'no saved password for this account')
         log "!!! REWARDS #{name}: no saved password for this account", $stderr
+      elsif check_plan(name, password) == 'F2P'
+        result['free'] = true
+        log "REWARDS #{name}: free-to-play account, so there's nothing to claim (no SimuCoin bonus or daily rewards)"
       else
         if acct[:coins] || !named.empty? # an account claimed by name always gets its SimuCoins checked
           begin
-            c = claim_coins(name, password)
+            c = claim_coins(name, password, game: acct[:store_game])
             result['coins'] = c.transform_keys(&:to_s)
             log "REWARDS #{name}: SimuCoins #{c[:status].tr('_', ' ')} - #{c[:message]}#{c[:balance].to_s.empty? ? '' : " (balance #{c[:balance]})"}"
           rescue StoreError => e
@@ -584,7 +656,9 @@ module Rewards
           end
         end
         if acct[:daily]
-          busy = (load_entries rescue []).select { |e| e[:user_id].to_s.casecmp?(name) && online?(e[:char_name].to_s) }
+          busy = (load_entries rescue []).select do |e|
+            e[:user_id].to_s.casecmp?(name) && DAILY_GAMES.include?(e[:game_code].to_s.upcase) && online?(who_of(e))
+          end
           if busy.any?
             msg = "skipped: #{busy.map { |e| e[:char_name] }.join(', ')} online (a login reward run would disconnect them)"
             result['logins'] = [['(account)', msg, true]]
@@ -641,6 +715,9 @@ module Rewards
     if result['error']
       rows << base.merge('reward' => '-', 'status' => 'error', 'text' => result['error'], 'ok' => false)
     end
+    if result['free']
+      rows << base.merge('reward' => '-', 'status' => 'free', 'text' => 'free-to-play: nothing to claim', 'ok' => true)
+    end
     return if rows.empty?
 
     list = (history + rows).last(HISTORY_KEEP)
@@ -662,6 +739,8 @@ module Rewards
   def summary(last)
     return 'never run' unless last
     when_s = Time.at(last['at']).strftime('%b %-d %-I:%M %p')
+    return "#{when_s}: free-to-play, nothing to claim" if last['free']
+
     parts = []
     parts << (last['error'] || '') if last['error']
     if (c = last['coins'])

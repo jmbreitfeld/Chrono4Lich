@@ -7,7 +7,7 @@ Unicode true
 !define FOLDER    "Chrono4Lich"
 !define PUBLISHER "Peggyanne"
 !ifndef VERSION   ; the GitHub build passes the release's version with -DVERSION=x.y.z
-  !define VERSION "1.10.0"
+  !define VERSION "1.11.0"
 !endif
 !ifndef SRC       ; where the files to install are (build.sh passes its prepared copies)
   !define SRC "."
