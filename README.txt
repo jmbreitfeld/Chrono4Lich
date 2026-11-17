@@ -161,6 +161,8 @@ SCHEDULES - GOOD TO KNOW
   - Only one character per account can be online at a time, so Chrono won't let
     one schedule contain two characters from the same account.
   - Everything is written to the log: Lich5/data/chrono/chrono.log
+  - If the window ever closes by itself without a message, Ruby's own crash report is
+    in window_errors.log in the same folder. Send it with chrono.log when reporting it.
 
 REWARDS
   - Tick "Claim rewards automatically every day at", pick a time, click Save. Chrono

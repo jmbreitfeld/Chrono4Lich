@@ -279,13 +279,21 @@ module Appearance
     base = 12.0 if base <= 0
     desc.size = (base * text_scale / 100.0 * Pango::SCALE).round
     want_dark = dark?
-    changed = s.gtk_application_prefer_dark_theme? != want_dark || s.gtk_font_name != desc.to_s
-    s.gtk_application_prefer_dark_theme = want_dark
-    s.gtk_font_name = desc.to_s
+    font = desc.to_s
+    # This runs every 30 seconds. Touch GTK only when something changed: each setting or style
+    # sheet change makes GTK restyle the whole window.
+    dark_changed = s.gtk_application_prefer_dark_theme? != want_dark
+    font_changed = s.gtk_font_name != font
+    s.gtk_application_prefer_dark_theme = want_dark if dark_changed
+    s.gtk_font_name = font if font_changed
     # tick boxes and round buttons don't follow the font, so grow them with it (themes draw them 14-16px)
     box = (14 * text_scale / 100.0).round
-    css.load(data: "check, radio { min-width: #{box}px; min-height: #{box}px; }")
-    changed
+    style = "check, radio { min-width: #{box}px; min-height: #{box}px; }"
+    unless @style == style
+      css.load(data: style)
+      @style = style
+    end
+    dark_changed || font_changed
   rescue StandardError => e
     gui_log("couldn't apply the appearance settings: #{e.class}: #{e.message}")
     false
@@ -2376,7 +2384,8 @@ class ChronoWindow
   def refresh_status
     @busy_refreshing = true
     @store.each do |_model, _path, iter|
-      iter[COL_STATUS] = status_text(iter[COL_SPEC])
+      text = status_text(iter[COL_SPEC])
+      iter[COL_STATUS] = text unless iter[COL_STATUS] == text # (every 3 seconds: redraw only on a change)
     end
   ensure
     @busy_refreshing = false
@@ -2684,10 +2693,29 @@ rescue StandardError, LoadError => e # never stop the window from opening over t
   gui_log("Couldn't take Quit from the Dock: #{e.class}: #{e.message}")
 end
 
+# A crash inside Ruby itself or a library it runs (a segmentation fault) skips the crash handler
+# below. Ruby then writes its own report, which names the line it was on, to standard error. When
+# Chrono is opened from the Dock, Start menu or a shortcut, standard error goes nowhere, so send
+# it to window_errors.log next to chrono.log. GTK's warnings land there too. Left alone in a terminal.
+def keep_crash_reports
+  return if $stderr.tty? || !(defined?(STATE_DIR) && STATE_DIR)
+
+  FileUtils.mkdir_p(STATE_DIR)
+  path = File.join(STATE_DIR, 'window_errors.log')
+  File.rename(path, "#{path}.old") if File.size?(path).to_i > 1_000_000
+  $stderr.reopen(path, 'a')
+  $stderr.sync = true
+  $stderr.puts "===== #{Time.now.strftime('%Y-%m-%d %H:%M:%S')}  Chrono #{CHRONO_VERSION} window opened " \
+               "(PID #{Process.pid}, Ruby #{RUBY_VERSION}) ====="
+rescue StandardError
+  nil # only a diagnostic; never stop the window from opening over it
+end
+
 begin
   setup_app_identity
   LichFolderPicker.ensure_configured
   require_relative 'chrono'
+  keep_crash_reports
   Appearance.apply! # light/dark and text size (Settings tab), before any window is built
   begin
     waiting = migrate_from_lichsched!
