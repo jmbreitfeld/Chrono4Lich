@@ -437,15 +437,21 @@ class ChronoWindow
       info_dialog("Chrono #{rel[:version]} has no download for this system. Opening the release page.")
       return open_url(rel[:url])
     end
-    what = ChronoConfig.windows? ? "start the installer (its last page can reopen Chrono)" :
-                                   'run its install.sh, then reopen itself'
+    what = if ChronoConfig.windows? then 'start the installer (its last page can reopen Chrono)'
+           elsif ChronoConfig.mac? then 'install it in a Terminal window, then reopen itself'
+           else 'run its install.sh, then reopen itself'
+           end
     return unless confirm_dialog("Update to Chrono #{rel[:version]}?\n\nChrono will download #{asset[:name]} " \
                                  "(#{(asset[:size] / 1_048_576.0).round(1)} MB), check it, close, and #{what}.\n\n" \
                                  'Characters that are logged in stay logged in, and your settings and schedules are kept.')
     in_background("Downloading Chrono #{rel[:version]}...",
                   done: lambda { |path|
                     safely do
-                      ChronoUpdate.start!(path, version: rel[:version])
+                      if ChronoConfig.mac? # (see ChronoUpdate.start_mac!)
+                        ChronoUpdate.start_mac!(path, version: rel[:version])
+                      else
+                        ChronoUpdate.start!(path, version: rel[:version])
+                      end
                       append_log("Starting the update to Chrono #{rel[:version]}. Chrono will close now.")
                       remember_window_size
                       GLib::Timeout.add(800) { Gtk.main_quit; false }

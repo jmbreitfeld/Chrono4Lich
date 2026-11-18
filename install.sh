@@ -216,6 +216,7 @@ if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
     sips -z $((sz*2)) $((sz*2)) "$APP/chrono.png" --out "$set_dir/icon_${sz}x${sz}@2x.png" >/dev/null 2>&1 || true
   done
   iconutil -c icns "$set_dir" -o "$MAC_APP/Contents/Resources/chrono.icns" >/dev/null 2>&1 || true
+  rm -rf "$(dirname "$set_dir")"
 fi
 else
 # ---- menu entry (named chrono.desktop so the dock matches it to the window) ----

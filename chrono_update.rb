@@ -14,8 +14,10 @@
 #
 #   Windows (installed with the setup .exe): runs the new Chrono4Lich-setup-X.exe; its last page
 #     offers "Open Chrono now".
-#   Linux / Mac: unpacks Chrono4Lich-linux.tar.gz / Chrono4Lich-mac.tar.gz and runs its install.sh
-#     with the same Ruby, then reopens Chrono.
+#   Linux: unpacks Chrono4Lich-linux.tar.gz and, once Chrono has closed, runs its install.sh with
+#     the same Ruby, then reopens Chrono.
+#   Mac: unpacks Chrono4Lich-mac.tar.gz; a Terminal window runs its install.sh with the same Ruby
+#     once Chrono has closed (macOS would end a process Chrono left behind), then reopens Chrono.
 #   Windows copies set up from the zip can't update this way (the installer would make a second
 #     copy elsewhere), so for those Chrono opens the release page instead.
 
@@ -231,16 +233,9 @@ module ChronoUpdate
     raise Error, "Couldn't unpack #{File.basename(path)}." unless ok
   end
 
-  # Starts the downloaded update in a separate process that outlives Chrono. Chrono should close
-  # right after this.
-  def start!(path, version: nil)
-    if ChronoConfig.windows?
-      pid = Process.spawn(path, chdir: File.dirname(path), new_pgroup: true)
-      Process.detach(pid)
-      log "UPDATE started #{File.basename(path)}"
-      return
-    end
-
+  # Unpacks a checked Linux/Mac download and makes sure it holds the expected Chrono, newer than
+  # this one. Returns its Chrono4Lich folder.
+  def unpack_checked!(path, version: nil)
     work = File.join(File.dirname(path), 'unpacked')
     FileUtils.rm_rf(work)
     FileUtils.mkdir_p(work)
@@ -255,7 +250,56 @@ module ChronoUpdate
     unless found && ChronoGitHub.newer?(found, CHRONO_VERSION)
       raise Error, "The download holds Chrono #{found || '(unknown)'}, which isn't newer than this one, so it wasn't used."
     end
+    src
+  end
 
+  # Mac: hands the install to a Terminal window, then Chrono should close. A process Chrono starts
+  # itself can't do it: when an app quits, macOS ends everything it left running (even a job
+  # handed to launchd) unless the app is allowed to run in the background, so the installer was
+  # stopped before it began. Terminal is an app of its own, so its window carries on: it waits for
+  # this Chrono to close, runs install.sh with the same Ruby (as when installing by hand), shows
+  # its output, and opens the new Chrono.
+  def start_mac!(path, version: nil)
+    src = unpack_checked!(path, version: version)
+    dir = File.dirname(path)
+    log_file = File.join(dir, 'install.log')
+    app = File.join(ENV['XDG_DATA_HOME'] || File.join(Dir.home, '.local', 'share'), 'Chrono4Lich')
+    q = ->(x) { "'#{x.to_s.gsub("'", %q('\\''))}'" }
+    reopen = if ChronoConfig.dev_env('CHRONO_UPDATE_NO_RELAUNCH') == '1' then 'true' # (testing only)
+             else "open -a \"$(cat #{q.call(File.join(app, 'mac_app'))})\""
+             end
+    script = File.join(dir, 'Install Chrono update.command')
+    File.write(script, <<~SH)
+      #!/bin/bash
+      # Made by Chrono's "Update now": installs Chrono #{version || ''} once Chrono has closed, then opens it.
+      printf '\\n Updating Chrono to %s. Waiting for Chrono to close...\\n' #{q.call(version || 'the new version')}
+      for _ in $(seq 1 120); do kill -0 #{Process.pid} 2>/dev/null || break; sleep 0.5; done
+      cd #{q.call(src)} || exit 1
+      bash ./install.sh --ruby #{q.call(RbConfig.ruby)} --yes 2>&1 | tee #{q.call(log_file)}
+      if [ "${PIPESTATUS[0]}" = 0 ]; then
+        #{reopen} || printf '\\n Open Chrono from your Applications folder.\\n'
+        printf '\\n Chrono is updated. You can close this window.\\n'
+      else
+        printf '\\n The update did not finish (see above, or %s).\\n Use the release page to update instead.\\n' #{q.call(log_file)}
+      fi
+    SH
+    File.chmod(0o700, script)
+    raise Error, "Couldn't open Terminal to install the update." unless system('open', '-a', 'Terminal', script)
+
+    log "UPDATE installing #{File.basename(path)} in a Terminal window once Chrono closes (log: #{log_file})"
+  end
+
+  # Windows and Linux: starts the downloaded update in a separate process that outlives Chrono.
+  # Chrono should close right after this. (Mac: start_mac! instead.)
+  def start!(path, version: nil)
+    if ChronoConfig.windows?
+      pid = Process.spawn(path, chdir: File.dirname(path), new_pgroup: true)
+      Process.detach(pid)
+      log "UPDATE started #{File.basename(path)}"
+      return
+    end
+
+    src = unpack_checked!(path, version: version)
     ruby = RbConfig.ruby
     app = File.join(ENV['XDG_DATA_HOME'] || File.join(Dir.home, '.local', 'share'), 'Chrono4Lich')
     log_file = File.join(File.dirname(path), 'install.log')

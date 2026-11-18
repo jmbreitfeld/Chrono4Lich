@@ -61,7 +61,8 @@ INSTALL ON MAC
   the scheduled time. A reward run missed while the Mac slept happens when it wakes (not
   after it was shut down: then it runs the next day); a
   scheduled login or logout more than 10 minutes late is skipped instead (so a 6 PM login
-  doesn't happen at 9 AM). Failures show a Mac alert. Updates: "Update now" works the same.
+  doesn't happen at 9 AM). Failures show a Mac alert. Updates: "Update now" closes Chrono
+  and installs the update in a Terminal window, which then reopens Chrono.
   Uninstall: run ~/.local/share/Chrono4Lich/uninstall.sh
 
 USING IT
@@ -140,6 +141,9 @@ UPDATES
       Downloads only come from GitHub, over https. Windows: the setup .exe runs (its last
       page can reopen Chrono). Linux: the new install.sh runs with the same Ruby, then
       Chrono reopens (if that fails: ~/.cache/chrono/Chrono4Lich-update/install.log).
+      Mac: a Terminal window runs the new install.sh with the same Ruby once Chrono has
+      closed, shows how it went, and reopens Chrono. (macOS ends anything Chrono itself left
+      running when it closes, so the install runs in Terminal.)
       Characters stay logged in; settings and schedules are kept.
       (A Windows copy set up from the zip can't update itself; Update now opens the
       release page instead.)
