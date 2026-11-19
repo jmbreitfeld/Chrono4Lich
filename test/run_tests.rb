@@ -89,6 +89,7 @@ check('downloads only from GitHub over https',
       !ChronoUpdate.allowed_url?('http://github.com/a') &&
       !ChronoUpdate.allowed_url?('https://github.com.evil.example/a') &&
       !ChronoUpdate.allowed_url?('file:///etc/passwd'))
+check('sh_quote survives quotes and $', IO.popen(['sh', '-c', "printf '%s' #{ChronoUpdate.sh_quote(%q(it's $HOME "x"))}"], &:read) == %q(it's $HOME "x"))
 rel = { version: '1.2.0', assets: [{ name: 'Chrono4Lich-setup-1.1.0.exe' }, { name: 'Chrono4Lich-linux.tar.gz' }] }
 unless ChronoConfig.windows?
   check('the Linux/Mac download is picked by its exact name', ChronoUpdate.asset_for_here(rel)&.fetch(:name) == 'Chrono4Lich-linux.tar.gz')

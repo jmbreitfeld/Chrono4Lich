@@ -25,7 +25,7 @@ require 'time'
 require 'etc'
 
 # Chrono's version. The GitHub release build stamps the release's version here.
-CHRONO_VERSION = '1.11.0'
+CHRONO_VERSION = '1.11.1'
 require 'optparse'
 require_relative 'chrono_config'
 

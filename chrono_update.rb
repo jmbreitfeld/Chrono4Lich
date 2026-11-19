@@ -233,6 +233,9 @@ module ChronoUpdate
     raise Error, "Couldn't unpack #{File.basename(path)}." unless ok
   end
 
+  # One word for sh/bash, in single quotes (a ' inside becomes '\'').
+  def sh_quote(text) = "'#{text.to_s.gsub("'") { %q('\\'') }}'"
+
   # Unpacks a checked Linux/Mac download and makes sure it holds the expected Chrono, newer than
   # this one. Returns its Chrono4Lich folder.
   def unpack_checked!(path, version: nil)
@@ -264,7 +267,7 @@ module ChronoUpdate
     dir = File.dirname(path)
     log_file = File.join(dir, 'install.log')
     app = File.join(ENV['XDG_DATA_HOME'] || File.join(Dir.home, '.local', 'share'), 'Chrono4Lich')
-    q = ->(x) { "'#{x.to_s.gsub("'", %q('\\''))}'" }
+    q = method(:sh_quote)
     reopen = if ChronoConfig.dev_env('CHRONO_UPDATE_NO_RELAUNCH') == '1' then 'true' # (testing only)
              else "open -a \"$(cat #{q.call(File.join(app, 'mac_app'))})\""
              end
@@ -303,7 +306,7 @@ module ChronoUpdate
     ruby = RbConfig.ruby
     app = File.join(ENV['XDG_DATA_HOME'] || File.join(Dir.home, '.local', 'share'), 'Chrono4Lich')
     log_file = File.join(File.dirname(path), 'install.log')
-    q = ->(x) { "'#{x.to_s.gsub("'", %q('\\\\''))}'" }
+    q = method(:sh_quote)
     relaunch = if ChronoConfig.dev_env('CHRONO_UPDATE_NO_RELAUNCH') == '1' then 'true' # (testing only)
                elsif ChronoConfig.mac? then "{ open -a \"$(cat #{q.call(File.join(app, 'mac_app'))})\" || " \
                                             "#{q.call(ruby)} #{q.call(File.join(app, 'chrono_gui.rbw'))} >/dev/null 2>&1 & }"
