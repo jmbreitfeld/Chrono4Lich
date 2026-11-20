@@ -279,30 +279,40 @@ module Appearance
     end
   end
 
+  # GTK's settings object, fetched once and kept for good. glib2 finds the Ruby object for a GTK
+  # object through a pointer Ruby's garbage collector doesn't see. So when Chrono let go of it
+  # and fetched it again 30 seconds later, it could get back one the collector had already
+  # found unused but not yet freed; Ruby then freed it while apply! was using it, and the window
+  # crashed. Keeping it means it's never unused.
+  def settings = (@settings ||= Gtk::Settings.default)
+
   # Applies both settings. Returns true if anything changed (so the caller can redraw).
+  # This runs every 30 seconds, so it compares with what it set last time and only touches GTK
+  # when something changed: each setting or style sheet change makes GTK restyle the whole window.
   def apply!
-    s = Gtk::Settings.default
-    @base_font ||= s.gtk_font_name.to_s
-    desc = Pango::FontDescription.new(@base_font)
-    base = desc.size.to_f / Pango::SCALE
-    base = 12.0 if base <= 0
-    desc.size = (base * text_scale / 100.0 * Pango::SCALE).round
     want_dark = dark?
-    font = desc.to_s
-    # This runs every 30 seconds. Touch GTK only when something changed: each setting or style
-    # sheet change makes GTK restyle the whole window.
-    dark_changed = s.gtk_application_prefer_dark_theme? != want_dark
-    font_changed = s.gtk_font_name != font
-    s.gtk_application_prefer_dark_theme = want_dark if dark_changed
-    s.gtk_font_name = font if font_changed
-    # tick boxes and round buttons don't follow the font, so grow them with it (themes draw them 14-16px)
-    box = (14 * text_scale / 100.0).round
-    style = "check, radio { min-width: #{box}px; min-height: #{box}px; }"
-    unless @style == style
-      css.load(data: style)
-      @style = style
+    scale = text_scale
+    dark_changed = want_dark != @applied_dark
+    font_changed = scale != @applied_scale
+    return false unless dark_changed || font_changed
+
+    if dark_changed
+      settings.gtk_application_prefer_dark_theme = want_dark
+      @applied_dark = want_dark
     end
-    dark_changed || font_changed
+    if font_changed
+      @base_font ||= settings.gtk_font_name.to_s
+      desc = Pango::FontDescription.new(@base_font)
+      base = desc.size.to_f / Pango::SCALE
+      base = 12.0 if base <= 0
+      desc.size = (base * scale / 100.0 * Pango::SCALE).round
+      settings.gtk_font_name = desc.to_s
+      # tick boxes and round buttons don't follow the font, so grow them with it (themes draw them 14-16px)
+      box = (14 * scale / 100.0).round
+      css.load(data: "check, radio { min-width: #{box}px; min-height: #{box}px; }")
+      @applied_scale = scale
+    end
+    true
   rescue StandardError => e
     gui_log("couldn't apply the appearance settings: #{e.class}: #{e.message}")
     false
