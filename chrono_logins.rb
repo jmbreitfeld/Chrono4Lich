@@ -234,32 +234,28 @@ module SavedLogins
   def absolute_path?(path) = path.match?(%r{\A([a-z]:)?[\\/]}i)
 
   # A saved Warlock launch that can no longer start Warlock: its program (a full path) is gone,
-  # or (Windows) it names the program alone and Lich's folder for it no longer holds it. (Lich
-  # changes to that folder first, then starts the program from there.)
+  # or it names the program alone ("warlock") and it's neither in the launch folder (Lich changes
+  # to that folder first) nor on the PATH. Warlock 3.0's installer put itself on the PATH and 3.1
+  # doesn't, so Lich's standard "warlock --host ..." stops working after the update.
   def warlock_broken?(cmd, dir)
     prog = launch_program(cmd)
     return !File.exist?(prog) if absolute_path?(prog)
-    return false if dir.to_s.empty? || !Gem.win_platform? # found on the PATH
 
-    exe = prog.downcase.end_with?('.exe') ? prog : "#{prog}.exe"
-    !File.exist?(File.join(dir.to_s.tr('\\', '/'), exe))
+    exts = Gem.win_platform? ? ['', *ENV.fetch('PATHEXT', '.EXE').split(';')] : ['']
+    dirs = [*(dir.to_s.empty? ? [] : [dir.to_s]), *ENV.fetch('PATH', '').split(File::PATH_SEPARATOR)]
+    dirs.none? do |d|
+      exts.any? { |x| File.file?(File.join(d.tr('\\', '/'), prog + x.downcase)) || File.file?(File.join(d.tr('\\', '/'), prog + x)) }
+    end
   end
 
-  # The launch command and folder, pointed at Warlock's program at now.
+  # The launch command and folder, pointed at Warlock's program at now (always its full path,
+  # so neither the PATH nor the folder matters any more).
   def warlock_fixed(cmd, dir, now)
     now_dir = File.dirname(now.tr('\\', '/'))
     now_dir = now_dir.tr('/', '\\') if Gem.win_platform?
-    prog = launch_program(cmd)
     rest = cmd.to_s.strip
     rest = rest.start_with?('"') ? rest.sub(/\A"[^"]*"/, '') : rest.sub(/\A\S+/, '')
-    if absolute_path?(prog)
-      new_prog = now.include?(' ') ? %("#{now}") : now
-      [new_prog + rest, dir.to_s.empty? ? dir : now_dir]
-    elsif File.basename(now, '.*').casecmp?(File.basename(prog, '.*'))
-      [cmd, now_dir] # same program name: only its folder moved
-    else
-      [(now.include?(' ') ? %("#{now}") : now) + rest, now_dir]
-    end
+    [(now.include?(' ') ? %("#{now}") : now) + rest, dir.to_s.empty? ? dir : now_dir]
   end
 
   # Checks the Warlock logins in entries; if any can no longer start Warlock (an update moved
@@ -270,9 +266,10 @@ module SavedLogins
     return if broken.empty?
 
     e = broken.first
-    was = absolute_path?(launch_program(e[:custom_launch])) ? launch_program(e[:custom_launch]) : e[:custom_launch_dir]
+    prog = launch_program(e[:custom_launch])
+    was = absolute_path?(prog) || e[:custom_launch_dir].to_s.empty? ? prog : File.join(e[:custom_launch_dir], prog)
     now = find_warlock or
-      fail! "Warlock isn't at #{was} any more (an update may have moved it), and Chrono couldn't find " \
+      fail! "Lich can't start Warlock as saved (#{was}); an update may have moved it, and Chrono couldn't find " \
             "where it is now. On the Logins tab, Edit #{e[:char_name]}'s login and put Warlock's new location in its command."
     n = lich_folders.sum { |dir| in_folder(dir) { repoint_warlock_here(now) } }
     log "LOGINS Warlock moved (was #{was}, now #{now}): updated #{n} saved login(s)"
