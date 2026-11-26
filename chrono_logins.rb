@@ -98,66 +98,29 @@ module SavedLogins
 
   def warlock_launch?(custom_launch) = custom_launch.to_s.downcase.include?(WARLOCK)
 
-  # "Open Warlock full screen": Warlock sets its own window size (the last one it saved, or the
-  # one saved for the character), so Windows' "start maximized" has no effect on it. Warlock does
-  # take --width/--height/-x/-y, and a size given that way wins over its saved ones, so Chrono adds
-  # the screen's size (its usable area, in Warlock's "display pixels") at the top-left corner.
-  OLD_MAXIMIZED_PREFIX = 'cmd /c start "" /max ' # what Chrono 1.8.1 added; removed when seen
+  # Chrono used to open Warlock full screen by adding Warlock's size options to the launch command
+  # (and, in 1.8.1, a "start /max" in front). Warlock now keeps its own window size, so those are
+  # taken back out: before logging in (strip_warlock_sizes!), and when a command is shown to edit.
+  OLD_MAXIMIZED_PREFIX = 'cmd /c start "" /max '
   SIZE_ARGS_RE = /\s+--width\s+\d+\s+--height\s+\d+\s+-x\s+-?\d+\s+-y\s+-?\d+/
 
-  def maximize_supported? = true
+  def maximized?(cmd) = cmd.to_s.match?(SIZE_ARGS_RE) || cmd.to_s.strip.downcase.start_with?(OLD_MAXIMIZED_PREFIX.downcase)
 
-  def maximized?(cmd) = cmd.to_s.match?(SIZE_ARGS_RE)
+  # The command without the size options Chrono added. (on: kept for old callers; must be false.)
+  def with_maximized(cmd, on = false)
+    raise ArgumentError, 'full-screen Warlock was removed' if on
 
-  # [width, height] the command asks for, or nil
-  def full_screen_size(cmd)
-    m = cmd.to_s.match(/--width\s+(\d+)\s+--height\s+(\d+)/)
-    m && [m[1].to_i, m[2].to_i]
-  end
-
-  # The command without any size Chrono added, then (on) with the screen's size, or the given one.
-  def with_maximized(cmd, on, size: nil)
     base = cmd.to_s.strip
     base = base[OLD_MAXIMIZED_PREFIX.length..].to_s.strip while base.downcase.start_with?(OLD_MAXIMIZED_PREFIX.downcase)
-    base = base.gsub(SIZE_ARGS_RE, '').strip
-    return base unless on
-
-    x, y, w, h = screen_area
-    w, h = size if size
-    "#{base} --width #{w} --height #{h} -x #{x} -y #{y}"
+    base.gsub(SIZE_ARGS_RE, '').strip
   end
 
-  # The main screen's usable area (without the taskbar) as [x, y, width, height] in the units
-  # Warlock's options use (pixels at 100% display scaling).
-  def screen_area
-    @screen_area ||= detect_screen_area || [0, 0, 1920, 1040]
-  end
+  # Takes Chrono's old full-screen options out of every saved Warlock login, if any has them.
+  def strip_warlock_sizes!(entries)
+    return unless entries.any? { |e| e[:frontend] == WARLOCK && maximized?(e[:custom_launch]) }
 
-  def detect_screen_area
-    if Gem.win_platform?
-      require 'fiddle'
-      user32 = Fiddle.dlopen('user32')
-      spi = Fiddle::Function.new(user32['SystemParametersInfoW'],
-                                 [Fiddle::TYPE_UINT, Fiddle::TYPE_UINT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_UINT], Fiddle::TYPE_INT)
-      rect = Fiddle::Pointer.malloc(16, Fiddle::RUBY_FREE)
-      return nil if spi.call(0x30, 0, rect, 0).zero? # SPI_GETWORKAREA
-
-      l, t, r, b = rect[0, 16].unpack('l4')
-      dpi = (Fiddle::Function.new(user32['GetDpiForSystem'], [], Fiddle::TYPE_UINT).call rescue 96)
-      scale = dpi.to_i.positive? ? dpi / 96.0 : 1.0
-      [l, t, r - l, b - t].map { |v| (v / scale).round }
-    elsif defined?(Gdk::Display)
-      mon = Gdk::Display.default&.primary_monitor || Gdk::Display.default&.get_monitor(0)
-      wa = mon&.workarea
-      wa && [wa.x, wa.y, wa.width, wa.height]
-    end
-  rescue StandardError, LoadError
-    nil
-  end
-
-  # Turns "Open Warlock full screen" on or off for every saved Warlock login. Returns how many changed.
-  def set_warlock_maximized_all(on)
-    lich_folders.sum { |dir| in_folder(dir) { set_warlock_maximized_here(on) } }
+    n = lich_folders.sum { |dir| in_folder(dir) { set_warlock_maximized_here(false) } }
+    log "LOGINS took Chrono's old full-screen options out of #{n} Warlock login(s); Warlock keeps its own window size now"
   end
 
   def set_warlock_maximized_here(on)
@@ -193,7 +156,6 @@ module SavedLogins
       end
       write_dat(list) if n.positive?
     end
-    log "LOGINS Warlock maximized #{on ? 'on' : 'off'} for #{n} saved login(s)"
     n
   end
 
@@ -312,7 +274,7 @@ module SavedLogins
   # preset for this system. [command, folder or nil]
   def warlock_launch
     used = entries.select { |e| e[:frontend] == WARLOCK }
-                  .map { |e| [e[:custom_launch].to_s, e[:custom_launch_dir].to_s.empty? ? nil : e[:custom_launch_dir].to_s] }
+                  .map { |e| [with_maximized(e[:custom_launch]), e[:custom_launch_dir].to_s.empty? ? nil : e[:custom_launch_dir].to_s] }
     return used.tally.max_by { |_, n| n }.first unless used.empty?
     found = find_warlock
     return [%(#{found.include?(' ') ? %("#{found}") : found} --host localhost --port %port% --key %key%),

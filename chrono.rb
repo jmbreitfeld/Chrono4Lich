@@ -786,28 +786,10 @@ def dr_saga_folder_note
     'on the Settings tab.)'
 end
 
-# ---------- full-screen Warlock (Windows) ----------
-# Warlock picks its own window size, and a window merely sized to the screen still shows Windows'
-# invisible resize borders as a small gap. So once a Warlock character is in, Chrono finds its
-# window (Warlock titles it "Warlock - Name") and maximizes it, as the maximize button would.
+# ---------- Warlock's window ----------
+# (Chrono used to open Warlock full screen too; Warlock now keeps its own window size, so that's gone.)
 module WarlockWindow
-  SW_MAXIMIZE = 3
-  WAIT = 25 # seconds to look for the window
-
   module_function
-
-  def wanted?(entry)
-    Gem.win_platform? && entry[:frontend] == SavedLogins::WARLOCK && SavedLogins.maximized?(entry[:custom_launch])
-  end
-
-  def user32
-    @user32 ||= begin
-      require 'fiddle'
-      lib = Fiddle.dlopen('user32')
-      { find: Fiddle::Function.new(lib['FindWindowW'], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP),
-        show: Fiddle::Function.new(lib['ShowWindow'], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT], Fiddle::TYPE_INT) }
-    end
-  end
 
   # Warlock stays open, disconnected, after its Lich exits. Once a Warlock character's Lich has
   # exited after a logout, close its Warlock too: Mac/Linux by ending what's left of Lich's process
@@ -838,27 +820,6 @@ module WarlockWindow
     nil # nothing left in the group
   rescue StandardError, LoadError => e
     log "LOGOUT #{who}: couldn't close Warlock: #{e.message}"
-  end
-
-  # Looks for the character's Warlock window for up to WAIT seconds and maximizes it. true if done.
-  def maximize(name)
-    title = "Warlock - #{name}\0".encode('UTF-16LE')
-    deadline = Time.now + WAIT
-    while Time.now < deadline
-      hwnd = user32[:find].call(nil, title)
-      unless hwnd.null?
-        user32[:show].call(hwnd, SW_MAXIMIZE)
-        log "LOGIN  #{name}: maximized Warlock's window"
-        return true
-      end
-      sleep 0.5
-    end
-    log "LOGIN  #{name}: didn't find a window titled \"Warlock - #{name}\" to maximize " \
-        '(a custom window title set in Warlock would explain it)'
-    false
-  rescue StandardError, LoadError => e
-    log "LOGIN  #{name}: couldn't maximize Warlock's window: #{e.message}"
-    false
   end
 end
 
@@ -891,6 +852,7 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   end
   check_account_conflicts(entries, selected)
   SavedLogins.fix_moved_warlock!(selected)
+  SavedLogins.strip_warlock_sizes!(load_entries)
   ensure_state_dir
 
   # All characters log in at the same time, like ticking several in Lich's login window:
@@ -900,16 +862,11 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
   # Characters are known by who_of ("Name", or "Name:realm" for DragonRealms).
   results = {}
   waiting = {} # who => [pid, deadline, entry, started]
-  maximizers = [] # threads maximizing Warlock windows (Windows, full-screen Warlock logins)
   check = lambda do
     waiting.to_a.each do |who, (pid, deadline, entry, started)|
       progress = login_progress(entry, pid, deadline, timeout, started: started)
       next unless progress
 
-      # maximizing waits for the window, so it happens alongside the other logins
-      if progress == :online && WarlockWindow.wanted?(entry)
-        maximizers << Thread.new { WarlockWindow.maximize(entry[:char_name]) }
-      end
       results[who] = nil
       waiting.delete(who)
     rescue Fail => e
@@ -942,7 +899,6 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
     sleep 1 unless waiting.empty?
   end
   # summary in the order the characters were picked
-  maximizers.each(&:join)
   summarize('Login', selected.map { |e| who_of(e) }.select { |n| results.key?(n) }.to_h { |n| [n, results[n]] })
 end
 

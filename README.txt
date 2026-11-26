@@ -79,9 +79,7 @@ USING IT
   Logins tab: laid out like Lich's account manager. Click an account to open its list of
     characters. On a character, click its Frontend to pick another from a dropdown
     (Warlock included), or select it and click "Edit..." to change its frontend and,
-    for Warlock, its launch command and whether Warlock opens full screen (and at what size).
-    "Open Warlock full screen for every Warlock login" turns that on or off for all your
-    Warlock logins at once. "Add account..." adds an account (type the account and password,
+    for Warlock, its launch command. "Add account..." adds an account (type the account and password,
     click "Look up characters", tick the ones to save); "Add characters..." adds more
     characters to the selected account; "Change password..." after changing it on
     play.net; "Remove..." removes the selected character, or the whole account if an
@@ -95,15 +93,13 @@ USING IT
     Lich's standard one; if Warlock isn't found when you log in, put the full path to
     Warlock in the "Warlock command" box. If a Warlock update moves it (Warlock 3.1 moved
     from Program Files to AppData\Local\Programs\Warlock), Chrono notices before logging
-    in, finds where it is now and updates your saved Warlock logins. A character saved for Warlock and for another
-    frontend logs in with Warlock.
+    in, finds where it is now and updates your saved Warlock logins. A character saved
+    for Warlock and for another frontend logs in with Warlock.
     Logging a Warlock character out from Chrono also closes its Warlock (otherwise Warlock
     stays open, disconnected, after Lich exits).
-    Full-screen Warlock: Warlock sets its own window size (the last one it used), so Chrono
-    adds Warlock's own size options to the command: --width/--height of your screen (without
-    the taskbar) and -x 0 -y 0. When Chrono logs the character in (by hand or on a
-    schedule), it then maximizes Warlock's window ("Warlock - Name") once the character is
-    in, so it fills the screen exactly. Logging in from Lich's own window only gets the size.
+    Window size: current Warlock remembers its own window size and position, so Chrono no
+    longer sets them. (Older Chrono could open Warlock full screen by adding size options to
+    the command; Chrono takes those back out the next time it logs a character in.)
     Saga: pick "saga" as the frontend. Saga logs characters in itself: Lich hands the login
     to Saga, which signs in with the login saved in Saga (so the account must be saved
     there too) and starts its own Lich for the character. Chrono can see that character
