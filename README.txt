@@ -93,7 +93,9 @@ USING IT
     saved with the login (Lich's login window shows these as "stormfront" with a custom
     launch). Chrono fills the command in from a login that already uses Warlock, or with
     Lich's standard one; if Warlock isn't found when you log in, put the full path to
-    Warlock in the "Warlock command" box. A character saved for Warlock and for another
+    Warlock in the "Warlock command" box. If a Warlock update moves it (Warlock 3.1 moved
+    from Program Files to AppData\Local\Programs\Warlock), Chrono notices before logging
+    in, finds where it is now and updates your saved Warlock logins. A character saved for Warlock and for another
     frontend logs in with Warlock.
     Logging a Warlock character out from Chrono also closes its Warlock (otherwise Warlock
     stays open, disconnected, after Lich exits).

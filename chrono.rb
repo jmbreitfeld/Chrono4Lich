@@ -890,6 +890,7 @@ def cmd_login(specs, default_realm, scripts, timeout, gap, skip_online: false)
     ensure_helper!(lich)
   end
   check_account_conflicts(entries, selected)
+  SavedLogins.fix_moved_warlock!(selected)
   ensure_state_dir
 
   # All characters log in at the same time, like ticking several in Lich's login window:

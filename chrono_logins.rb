@@ -202,6 +202,114 @@ module SavedLogins
     warlock_launch?(custom_launch) ? WARLOCK : frontend.to_s
   end
 
+  # ---------- Warlock moved by an update ----------
+  # Saved Warlock logins hold the full path of Warlock's program. An update can move it: Warlock
+  # 3.1 installs for the user (AppData\Local\Programs\Warlock) where 3.0 used Program Files.
+  # Lich then can't start Warlock and the login fails. Before logging in, Chrono notices that,
+  # finds where Warlock is now, and updates the saved logins that pointed at the old place.
+
+  # The program a launch command runs: its first word, which may be in "quotes".
+  def launch_program(cmd)
+    cmd = cmd.to_s.strip
+    cmd.start_with?('"') ? cmd[1..].to_s[/\A[^"]*/].to_s : cmd.split(/\s+/, 2).first.to_s
+  end
+
+  # Where Warlock's program is on this computer, or nil.
+  def find_warlock
+    list =
+      if Gem.win_platform?
+        local = ENV['LOCALAPPDATA'].to_s.tr('\\', '/')
+        [*([File.join(local, 'Programs', 'Warlock', 'Warlock.exe')] unless local.empty?),
+         *%w[ProgramFiles ProgramW6432 ProgramFiles(x86)].filter_map { |v| ENV[v] && File.join(ENV[v].tr('\\', '/'), 'Warlock', 'Warlock.exe') },
+         *(local.empty? ? [] : Dir.glob(File.join(local, 'Programs', 'Warlock*', 'Warlock*.exe')))]
+      elsif RUBY_PLATFORM.include?('darwin')
+        ['/Applications/Warlock.app/Contents/MacOS/Warlock', File.join(Dir.home, 'Applications/Warlock.app/Contents/MacOS/Warlock')]
+      else
+        ['/usr/bin/warlock', '/usr/local/bin/warlock', '/opt/warlock/bin/Warlock', File.join(Dir.home, '.local/bin/warlock')]
+      end
+    found = list.find { |f| File.file?(f) }
+    found && Gem.win_platform? ? found.tr('/', '\\') : found
+  end
+
+  def absolute_path?(path) = path.match?(%r{\A([a-z]:)?[\\/]}i)
+
+  # A saved Warlock launch that can no longer start Warlock: its program (a full path) is gone,
+  # or (Windows) it names the program alone and Lich's folder for it no longer holds it. (Lich
+  # changes to that folder first, then starts the program from there.)
+  def warlock_broken?(cmd, dir)
+    prog = launch_program(cmd)
+    return !File.exist?(prog) if absolute_path?(prog)
+    return false if dir.to_s.empty? || !Gem.win_platform? # found on the PATH
+
+    exe = prog.downcase.end_with?('.exe') ? prog : "#{prog}.exe"
+    !File.exist?(File.join(dir.to_s.tr('\\', '/'), exe))
+  end
+
+  # The launch command and folder, pointed at Warlock's program at now.
+  def warlock_fixed(cmd, dir, now)
+    now_dir = File.dirname(now.tr('\\', '/'))
+    now_dir = now_dir.tr('/', '\\') if Gem.win_platform?
+    prog = launch_program(cmd)
+    rest = cmd.to_s.strip
+    rest = rest.start_with?('"') ? rest.sub(/\A"[^"]*"/, '') : rest.sub(/\A\S+/, '')
+    if absolute_path?(prog)
+      new_prog = now.include?(' ') ? %("#{now}") : now
+      [new_prog + rest, dir.to_s.empty? ? dir : now_dir]
+    elsif File.basename(now, '.*').casecmp?(File.basename(prog, '.*'))
+      [cmd, now_dir] # same program name: only its folder moved
+    else
+      [(now.include?(' ') ? %("#{now}") : now) + rest, now_dir]
+    end
+  end
+
+  # Checks the Warlock logins in entries; if any can no longer start Warlock (an update moved
+  # it), points every such saved login at where Warlock is now. Fails, saying what to do, if
+  # Warlock can't be found. Call it once, before starting any logins.
+  def fix_moved_warlock!(entries)
+    broken = entries.select { |e| e[:frontend] == WARLOCK && warlock_broken?(e[:custom_launch], e[:custom_launch_dir]) }
+    return if broken.empty?
+
+    e = broken.first
+    was = absolute_path?(launch_program(e[:custom_launch])) ? launch_program(e[:custom_launch]) : e[:custom_launch_dir]
+    now = find_warlock or
+      fail! "Warlock isn't at #{was} any more (an update may have moved it), and Chrono couldn't find " \
+            "where it is now. On the Logins tab, Edit #{e[:char_name]}'s login and put Warlock's new location in its command."
+    n = lich_folders.sum { |dir| in_folder(dir) { repoint_warlock_here(now) } }
+    log "LOGINS Warlock moved (was #{was}, now #{now}): updated #{n} saved login(s)"
+  end
+
+  def repoint_warlock_here(now)
+    return 0 unless File.exist?(yaml_file) || File.exist?(dat_file)
+
+    needs = ->(cmd, dir) { warlock_launch?(cmd) && warlock_broken?(cmd, dir) }
+    n = 0
+    if backend == :yaml
+      chars = (load_yaml['accounts'] || {}).values.flat_map { |a| Array(a['characters']) }
+      return 0 unless chars.any? { |c| mine?(c['game_code']) && needs.call(c['custom_launch'], c['custom_launch_dir']) }
+
+      edit_yaml do |d|
+        (d['accounts'] || {}).each_value do |acct|
+          Array(acct['characters']).each do |c|
+            next unless mine?(c['game_code']) && needs.call(c['custom_launch'], c['custom_launch_dir'])
+
+            c['custom_launch'], c['custom_launch_dir'] = warlock_fixed(c['custom_launch'], c['custom_launch_dir'], now)
+            n += 1
+          end
+        end
+      end
+    else
+      list = dat_entries
+      list.each do |e|
+        next unless mine?(e[:game_code]) && needs.call(e[:custom_launch], e[:custom_launch_dir])
+
+        e[:custom_launch], e[:custom_launch_dir] = warlock_fixed(e[:custom_launch], e[:custom_launch_dir], now)
+        n += 1
+      end
+      write_dat(list) if n.positive?
+    end
+    n
+  end
+
   # The command Lich runs to start Warlock, and the folder to run it in: copied from a login that
   # already uses Warlock (so it matches what works on this computer), otherwise Lich's own
   # preset for this system. [command, folder or nil]
@@ -209,6 +317,10 @@ module SavedLogins
     used = entries.select { |e| e[:frontend] == WARLOCK }
                   .map { |e| [e[:custom_launch].to_s, e[:custom_launch_dir].to_s.empty? ? nil : e[:custom_launch_dir].to_s] }
     return used.tally.max_by { |_, n| n }.first unless used.empty?
+    found = find_warlock
+    return [%(#{found.include?(' ') ? %("#{found}") : found} --host localhost --port %port% --key %key%),
+            Gem.win_platform? ? File.dirname(found.tr('\\', '/')).tr('/', '\\') : nil] if found
+
     cmd =
       if Gem.win_platform? then 'warlock'
       elsif RUBY_PLATFORM.include?('darwin') then '/Applications/Warlock.app/Contents/MacOS/Warlock'
