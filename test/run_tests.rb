@@ -110,6 +110,25 @@ if system('bash', '-c', 'true')
   end
 end
 
+# ---------- rewards: free-to-play accounts skip SimuCoins but still get daily login rewards ----------
+DATA_DIR = STATE_DIR
+LICH_DIR = nil
+def online?(*) = false
+require File.join(ROOT, 'chrono_eaccess')
+require File.join(ROOT, 'chrono_rewards')
+store_asked = []
+{ accounts: ->(*) { [{ name: 'FREEONE', coins: true, daily: true, daily_ok: true, where: 'pc', store_game: 'GS' }] },
+  passwords: ->(*) { { 'FREEONE' => 'x' } },
+  load_entries: ->(*) { [] },
+  check_plan: ->(*) { 'F2P' },
+  claim_coins: ->(name, *, **) { store_asked << name; { status: 'none', message: '' } },
+  daily_logins: ->(*) { [['Peggyanne', '500 fame', true]] } }.each { |m, f| Rewards.define_singleton_method(m, &f) }
+check('a free-to-play run succeeds', Rewards.run == true)
+check("a free-to-play account's SimuCoins aren't checked", store_asked.empty?)
+last = Rewards.load['last']['FREEONE'] || {}
+check('a free-to-play account still gets its daily login rewards', last['free'] && last['logins'] == [['Peggyanne', '500 fame', true]])
+check('its result says both', Rewards.summary(last).end_with?('free-to-play, no SimuCoin bonus; daily: 1/1 characters ok'))
+
 FileUtils.rm_rf(STATE_DIR)
 puts "#{$count - $failures}/#{$count} checks passed"
 exit($failures.zero? ? 0 : 1)

@@ -743,7 +743,7 @@ class ChronoWindow
     @rewards_info.wrap = true
     page.pack_start(@rewards_info, expand: false, fill: false)
 
-    # free-to-play accounts get no rewards; hiding them is kept for next time
+    # free-to-play accounts get only daily login rewards; hiding them is kept for next time
     f2p_row = Gtk::Box.new(:horizontal, 12)
     @hide_f2p = Gtk::CheckButton.new("Don't show F2P")
     @hide_f2p.active = GuiPrefs.get('hide_f2p', false) == true
@@ -771,9 +771,10 @@ class ChronoWindow
         end
       end
       column = Gtk::TreeViewColumn.new(title, toggle, active: col)
-      # no box for a free-to-play account, nor a daily one for an account with no characters that get them
+      # no SimuCoins box for a free-to-play account (it gets no bonus), and no daily one for an
+      # account with no characters that get daily rewards
       column.set_cell_data_func(toggle) do |_c, r, _m, it|
-        r.activatable = r.visible = !it[7] && (key != :daily || it[5])
+        r.activatable = r.visible = key == :daily ? it[5] : !it[7]
       end
       @rewards_view.append_column(column)
     end
@@ -788,7 +789,8 @@ class ChronoWindow
       end
     end
     gh_col = Gtk::TreeViewColumn.new('Claim on GitHub', gh_toggle, active: 4)
-    gh_col.set_cell_data_func(gh_toggle) { |_c, r, _m, it| r.activatable = r.visible = !it[7] }
+    # (a free-to-play account can still claim its daily login rewards there)
+    gh_col.set_cell_data_func(gh_toggle) { |_c, r, _m, it| r.activatable = r.visible = !it[7] || it[5] }
     @rewards_view.append_column(gh_col)
     last = Gtk::TreeViewColumn.new('Last result', Gtk::CellRendererText.new, text: 3)
     last.expand = true

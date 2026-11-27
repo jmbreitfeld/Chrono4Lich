@@ -186,9 +186,11 @@ REWARDS
     on for an account you might be playing at that time: a character online somewhere
     Chrono didn't start would be disconnected. If a character Chrono started is online,
     that account's daily logins are skipped that day.
-  - Free-to-play accounts get no rewards. Each run asks Simutronics' login service for
-    every account's plan (the way Lich does) and skips free-to-play ones; the Plan
-    column shows it (F2P, Standard, Premium), and "Don't show F2P" hides those accounts.
+  - Free-to-play accounts get no SimuCoin bonus, but they do get daily login rewards.
+    Each run asks Simutronics' login service for every account's plan (the way Lich
+    does) and skips the SimuCoin check for free-to-play ones (no SimuCoins box); their
+    daily login rewards work as for any account. The Plan column shows the plan (F2P,
+    Standard, Premium), and "Don't show F2P" hides those accounts.
   - "Claim now" runs it right away; "Claim now for selected" does one account.
   - "History..." lists everything this computer has claimed or tried, newest first,
     with the last date SimuCoins were actually claimed for each account. (Accounts that
