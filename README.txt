@@ -72,6 +72,9 @@ USING IT
     character. Ticked characters log in at the same time (each one starts two
     seconds after the last, so they don't all hit the login server at once). "Force close" is only for when a normal logout fails; the
     character may stay linkdead in the game for a while.
+    The Frontend column shows what each character logs in with; click it to pick another
+    from the dropdown (the same change as on the Logins tab). Changing it for a character
+    that's online takes effect the next time it logs in.
   Schedules tab: New... makes a schedule (characters, days, login time, optional
     logout time, optional start scripts). Use "Test login now" to try one out.
   Rewards tab: claim your monthly subscription SimuCoins (and, if you want, each
@@ -189,7 +192,8 @@ REWARDS
   - Free-to-play accounts get no SimuCoin bonus, but they do get daily login rewards.
     Each run asks Simutronics' login service for every account's plan (the way Lich
     does) and skips the SimuCoin check for free-to-play ones (no SimuCoins box); their
-    daily login rewards work as for any account. The Plan column shows the plan (F2P,
+    daily login rewards work as for any account, claimed from this computer (not on GitHub,
+    where the claim always checks SimuCoins first). The Plan column shows the plan (F2P,
     Standard, Premium), and "Don't show F2P" hides those accounts.
   - "Claim now" runs it right away; "Claim now for selected" does one account.
   - "History..." lists everything this computer has claimed or tried, newest first,

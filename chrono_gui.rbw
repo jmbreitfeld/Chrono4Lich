@@ -326,6 +326,8 @@ class ChronoWindow
   COL_ACCOUNT = 3
   COL_STATUS  = 4
   COL_SPEC    = 5
+  COL_FRONTEND = 6 # the frontend this character logs in with (editable)
+  COL_CODE     = 7 # its game code, to find its saved login
 
   STATE_TEXT = {
     'online'        => 'Online',
@@ -579,7 +581,7 @@ class ChronoWindow
     outer.pack_start(filters, expand: false, fill: false)
 
     # character list
-    @store = Gtk::ListStore.new(TrueClass, String, String, String, String, String)
+    @store = Gtk::ListStore.new(TrueClass, String, String, String, String, String, String, String)
     @view = Gtk::TreeView.new(@store)
     toggle = Gtk::CellRendererToggle.new
     toggle.signal_connect('toggled') do |_, path|
@@ -589,12 +591,18 @@ class ChronoWindow
     end
     @check_col = Gtk::TreeViewColumn.new('', toggle, active: COL_CHECK)
     @view.append_column(@check_col)
-    [['Character', COL_NAME], ['Realm', COL_REALM], ['Account', COL_ACCOUNT], ['Status', COL_STATUS]].each do |title, col|
+    [['Character', COL_NAME], ['Realm', COL_REALM], ['Account', COL_ACCOUNT]].each do |title, col|
       column = Gtk::TreeViewColumn.new(title, Gtk::CellRendererText.new, text: col)
       column.resizable = true
       column.sort_column_id = col
       @view.append_column(column)
     end
+    @frontend_col = character_frontend_column
+    @view.append_column(@frontend_col)
+    status_col = Gtk::TreeViewColumn.new('Status', Gtk::CellRendererText.new, text: COL_STATUS)
+    status_col.resizable = true
+    status_col.sort_column_id = COL_STATUS
+    @view.append_column(status_col)
     # A "Log in" / "Log out" button on each row: one character, whatever is ticked. A list
     # can't hold real buttons, so it shows a picture of one, drawn by a real (off-screen) button
     # in the current theme; clicks on it are handled below.
@@ -621,9 +629,10 @@ class ChronoWindow
       end
     end
     # Double-clicking a character (or Enter on it) does what its row's button does: Log in or Log out.
-    # (Double-clicking the tick box only ticks it; the button handles its own clicks above.)
+    # (Double-clicking the tick box only ticks it, and the Frontend only opens its dropdown; the
+    # button handles its own clicks above.)
     @view.signal_connect('row-activated') do |_view, path, column|
-      next if column == @check_col
+      next if column == @check_col || column == @frontend_col # (those are for ticking and picking)
 
       iter = @store.get_iter(path)
       action = iter && row_action(iter)
@@ -789,8 +798,10 @@ class ChronoWindow
       end
     end
     gh_col = Gtk::TreeViewColumn.new('Claim on GitHub', gh_toggle, active: 4)
-    # (a free-to-play account can still claim its daily login rewards there)
-    gh_col.set_cell_data_func(gh_toggle) { |_c, r, _m, it| r.activatable = r.visible = !it[7] || it[5] }
+    # Not for a free-to-play account: simu-rewards on GitHub always checks the store first, and
+    # for an account with no SimuCoin bonus that would likely fail the run every day. Its daily
+    # login rewards are claimed here instead.
+    gh_col.set_cell_data_func(gh_toggle) { |_c, r, _m, it| r.activatable = r.visible = !it[7] }
     @rewards_view.append_column(gh_col)
     last = Gtk::TreeViewColumn.new('Last result', Gtk::CellRendererText.new, text: 3)
     last.expand = true
@@ -1817,6 +1828,40 @@ class ChronoWindow
     col
   end
 
+  # The Characters tab's Frontend column: pick another frontend from its dropdown, as on the
+  # Logins tab. It changes the saved login this character logs in with.
+  def character_frontend_column
+    choices = Gtk::ListStore.new(String)
+    (SavedLogins.frontends rescue %w[stormfront wizard]).each { |f| choices.append[0] = f }
+    cell = Gtk::CellRendererCombo.new
+    cell.model = choices
+    cell.text_column = 0
+    cell.has_entry = false
+    cell.editable = true
+    col = Gtk::TreeViewColumn.new('Frontend', cell, text: COL_FRONTEND)
+    col.resizable = true
+    col.sort_column_id = COL_FRONTEND
+    cell.signal_connect('edited') do |_, path, new_text|
+      safely do
+        it = @store.get_iter(path)
+        next unless it && !new_text.to_s.empty? && new_text != it[COL_FRONTEND]
+
+        acct, name, code, from, spec = it[COL_ACCOUNT], it[COL_NAME], it[COL_CODE], it[COL_FRONTEND], it[COL_SPEC]
+        in_background("Changing #{name}'s frontend...",
+                      done: lambda { |_|
+                        on = (online?(who_from_spec(spec)) rescue false)
+                        note = on ? ' It takes effect the next time it logs in.' : ''
+                        append_log("#{name} (#{acct}) now uses #{new_text}#{new_text == SavedLogins::WARLOCK ? " (#{SavedLogins.warlock_launch.first})" : ''}.#{note}")
+                        logins_changed
+                      },
+                      failed: ->(msg) { error_dialog("#{name}'s frontend wasn't changed:\n\n#{msg}") }) do
+          SavedLogins.set_frontend(acct, name, code, from, new_text)
+        end
+      end
+    end
+    col
+  end
+
   # Edit a saved character login: its frontend and, for Warlock, the launch command.
   def edit_login_dialog
     it = @logins_view.selection.selected
@@ -2337,7 +2382,9 @@ class ChronoWindow
       return
     end
     entries = load_entries
-    all = entries.uniq { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
+    # a character saved for more than one frontend logs in with Warlock if one is Warlock (see warlock_flag)
+    all = entries.group_by { |e| [e[:game_code], e[:char_name].to_s.downcase, e[:user_id].to_s.downcase] }
+                 .values.map { |same| same.find { |e| e[:frontend] == SavedLogins::WARLOCK } || same.first }
     shown = all.select { |e| shown_by_filters?(e) }
     @filter_count&.text = shown.size == all.size ? "#{all.size} characters" : "#{shown.size} of #{all.size} shown"
     shown.sort_by { |e| game_order(e) }.each do |e|
@@ -2349,6 +2396,8 @@ class ChronoWindow
       iter[COL_ACCOUNT] = e[:user_id].to_s
       iter[COL_STATUS]  = ''
       iter[COL_SPEC]    = spec
+      iter[COL_FRONTEND] = e[:frontend].to_s
+      iter[COL_CODE]     = e[:game_code].to_s
     end
     append_log("Loaded #{all.size} saved characters.") unless @loaded_message_shown
     @loaded_message_shown = true
