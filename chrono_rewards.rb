@@ -84,7 +84,8 @@ module Rewards
   end
 
   # ---------- free-to-play ----------
-  # Free-to-play accounts get no SimuCoin bonus and no daily login rewards, so runs skip them.
+  # Free-to-play accounts get no SimuCoin bonus, so runs don't check the store for them. They do
+  # get daily login rewards (fame and the like), so those run as for any other account.
   # Each run asks the login service for the account's plan (as Lich does at login) and keeps it.
 
   PLAN_NAMES = { 'FREE' => 'F2P', 'TRIAL' => 'Trial', 'NORMAL' => 'Standard', 'PREMIUM' => 'Premium',
@@ -640,11 +641,11 @@ module Rewards
       if password.to_s.empty?
         result.merge!('ok' => false, 'error' => 'no saved password for this account')
         log "!!! REWARDS #{name}: no saved password for this account", $stderr
-      elsif check_plan(name, password) == 'F2P'
-        result['free'] = true
-        log "REWARDS #{name}: free-to-play account, so there's nothing to claim (no SimuCoin bonus or daily rewards)"
       else
-        if acct[:coins] || !named.empty? # an account claimed by name always gets its SimuCoins checked
+        if check_plan(name, password) == 'F2P' # no SimuCoin bonus, but daily login rewards as usual
+          result['free'] = true
+          log "REWARDS #{name}: free-to-play account, so no SimuCoin bonus#{acct[:daily] ? '' : ' (daily login rewards are turned off)'}"
+        elsif acct[:coins] || !named.empty? # an account claimed by name always gets its SimuCoins checked
           begin
             c = claim_coins(name, password, game: acct[:store_game])
             result['coins'] = c.transform_keys(&:to_s)
@@ -716,7 +717,7 @@ module Rewards
       rows << base.merge('reward' => '-', 'status' => 'error', 'text' => result['error'], 'ok' => false)
     end
     if result['free']
-      rows << base.merge('reward' => '-', 'status' => 'free', 'text' => 'free-to-play: nothing to claim', 'ok' => true)
+      rows << base.merge('reward' => 'SimuCoins', 'status' => 'free', 'text' => 'free-to-play: no SimuCoin bonus', 'ok' => true)
     end
     return if rows.empty?
 
@@ -739,10 +740,9 @@ module Rewards
   def summary(last)
     return 'never run' unless last
     when_s = Time.at(last['at']).strftime('%b %-d %-I:%M %p')
-    return "#{when_s}: free-to-play, nothing to claim" if last['free']
-
     parts = []
     parts << (last['error'] || '') if last['error']
+    parts << 'free-to-play, no SimuCoin bonus' if last['free']
     if (c = last['coins'])
       parts << case c['status']
                when 'claimed' then "SimuCoins claimed#{c['balance'].to_s.empty? ? '' : " (balance #{c['balance']})"}"
